@@ -25,3 +25,6 @@ artifacts/
 
 # Local notebook / scratch files
 .ipynb_checkpoints/
+wandb/*
+*.log
+*.env

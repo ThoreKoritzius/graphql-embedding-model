@@ -4,8 +4,12 @@ import argparse
 import json
 from pathlib import Path
 
+import yaml
+
 from graphql_finetuning_pipeline.data.corpus import build_corpus
+from graphql_finetuning_pipeline.data.dataset_builder import DatasetBuildConfig, build_dataset
 from graphql_finetuning_pipeline.data.models import CorpusRecord, GraphQLTypeRecord, QueryRecord
+from graphql_finetuning_pipeline.data.openai_seed import OpenAISeedConfig, generate_openai_seed
 from graphql_finetuning_pipeline.data.schema_ingest import parse_schema
 from graphql_finetuning_pipeline.data.synthetic import (
     bootstrap_queries,
@@ -14,10 +18,12 @@ from graphql_finetuning_pipeline.data.synthetic import (
     quality_filter,
     split_queries,
 )
+from graphql_finetuning_pipeline.eval.benchmark import run_benchmarks
+from graphql_finetuning_pipeline.eval.plots import plot_benchmark_comparison, plot_epoch_metrics
 from graphql_finetuning_pipeline.eval.retrieval_eval import evaluate
 from graphql_finetuning_pipeline.retrieval.hard_negatives import mine_hard_negatives
 from graphql_finetuning_pipeline.retrieval.index import build_index
-from graphql_finetuning_pipeline.utils.io import ensure_dir, read_jsonl, sha256_file, write_json, write_jsonl
+from graphql_finetuning_pipeline.utils.io import ensure_dir, read_json, read_jsonl, sha256_file, write_json, write_jsonl
 
 
 def _load_types(path: Path) -> list[GraphQLTypeRecord]:
@@ -30,6 +36,28 @@ def _load_corpus(path: Path) -> list[CorpusRecord]:
 
 def _load_queries(path: Path) -> list[QueryRecord]:
     return [QueryRecord.model_validate(x) for x in read_jsonl(path)]
+
+
+def _load_yaml(path: Path | None) -> dict:
+    if not path:
+        return {}
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise ValueError("YAML config must be a mapping at the top level")
+    return payload
+
+
+def _load_benchmark_sets(benchmark_dir: Path | None) -> dict[str, list[QueryRecord]]:
+    if not benchmark_dir:
+        return {}
+    if not benchmark_dir.exists():
+        raise FileNotFoundError(f"Benchmark directory not found: {benchmark_dir}")
+    out: dict[str, list[QueryRecord]] = {}
+    for f in sorted(benchmark_dir.glob("*.jsonl")):
+        out[f.stem] = _load_queries(f)
+    return out
 
 
 def cmd_ingest_schema(args: argparse.Namespace) -> None:
@@ -61,13 +89,90 @@ def cmd_build_corpus(args: argparse.Namespace) -> None:
     print(json.dumps({"corpus": str(path), "count": len(corpus_rows)}, indent=2))
 
 
+def cmd_generate_openai_seed(args: argparse.Namespace) -> None:
+    corpus = _load_corpus(Path(args.corpus))
+    ycfg = _load_yaml(Path(args.config) if args.config else None)
+    ocfg = ycfg.get("openai", {})
+
+    cfg = OpenAISeedConfig(
+        model=args.model or ocfg.get("model", "gpt-4o-mini"),
+        temperature=args.temperature if args.temperature is not None else float(ocfg.get("temperature", 0.7)),
+        retries=args.retries if args.retries is not None else int(ocfg.get("retries", 3)),
+        items_per_type=args.items_per_type if args.items_per_type is not None else int(ocfg.get("items_per_type", 24)),
+    )
+
+    rows, raw = generate_openai_seed(
+        corpus=corpus,
+        out_dir=Path(args.out_dir),
+        cfg=cfg,
+        seed=args.seed,
+        api_key=args.api_key,
+        mock_responses_path=Path(args.mock_responses_path) if args.mock_responses_path else None,
+    )
+    print(
+        json.dumps(
+            {
+                "seed_pairs": len(rows),
+                "raw_logs": len(raw),
+                "seed_pairs_path": str(Path(args.out_dir) / "openai" / "seed_pairs_v1.jsonl"),
+                "raw_path": str(Path(args.out_dir) / "openai" / "raw_seed_responses.jsonl"),
+            },
+            indent=2,
+        )
+    )
+
+
+def cmd_build_dataset(args: argparse.Namespace) -> None:
+    corpus = _load_corpus(Path(args.corpus))
+    seed_rows = _load_queries(Path(args.openai_seed))
+    cfg_yaml = _load_yaml(Path(args.config) if args.config else None)
+    dcfg = cfg_yaml.get("dataset", {})
+
+    cfg = DatasetBuildConfig(
+        version=args.version,
+        train_ratio=args.train_ratio if args.train_ratio is not None else float(dcfg.get("train_ratio", 0.8)),
+        val_ratio=args.val_ratio if args.val_ratio is not None else float(dcfg.get("val_ratio", 0.1)),
+        seed=args.seed,
+        target_train_min=args.target_train_min if args.target_train_min is not None else int(dcfg.get("target_train_min", 20000)),
+        target_train_max=args.target_train_max if args.target_train_max is not None else int(dcfg.get("target_train_max", 50000)),
+    )
+
+    schema_hash = ""
+    if args.schema_hash_file:
+        payload = read_json(Path(args.schema_hash_file))
+        schema_hash = payload.get("schema_hash", "")
+    elif args.schema_hash:
+        schema_hash = args.schema_hash
+
+    generation_config = {
+        "openai_model": args.openai_model,
+        "seed_source": "openai",
+        "config_file": args.config,
+    }
+    manifest = build_dataset(
+        openai_seed_rows=seed_rows,
+        corpus=corpus,
+        out_dir=Path(args.out_dir),
+        schema_hash=schema_hash,
+        cfg=cfg,
+        generation_config=generation_config,
+    )
+    print(json.dumps(manifest, indent=2))
+
+
 def cmd_generate_synthetic(args: argparse.Namespace) -> None:
     out_dir = Path(args.out_dir)
     ensure_dir(out_dir / "splits")
     ensure_dir(out_dir / "benchmarks")
 
     corpus = _load_corpus(Path(args.corpus))
-    seed = bootstrap_queries(corpus, rng_seed=args.seed)
+    if args.seed_source == "openai":
+        if not args.openai_seed:
+            raise ValueError("--openai-seed is required when --seed-source openai")
+        seed = _load_queries(Path(args.openai_seed))
+    else:
+        seed = bootstrap_queries(corpus, rng_seed=args.seed)
+
     expanded = expand_queries(seed, max_expansions_per_seed=args.max_expansions)
     filtered = quality_filter(expanded, type_names={c.type_name for c in corpus})
     split_rows = split_queries(filtered, train_ratio=args.train_ratio, val_ratio=args.val_ratio, seed=args.seed)
@@ -83,6 +188,7 @@ def cmd_generate_synthetic(args: argparse.Namespace) -> None:
     print(
         json.dumps(
             {
+                "seed_source": args.seed_source,
                 "seed_count": len(seed),
                 "expanded_count": len(expanded),
                 "filtered_count": len(filtered),
@@ -115,7 +221,9 @@ def cmd_train_embedder(args: argparse.Namespace) -> None:
     train_rows = _load_queries(Path(args.train))
     val_rows = _load_queries(Path(args.val)) if args.val else []
     corpus_rows = _load_corpus(Path(args.corpus))
+    benchmark_sets = _load_benchmark_sets(Path(args.benchmark_dir) if args.benchmark_dir else None)
 
+    run_name = args.run_name or args.experiment_name
     cfg = TrainConfig(
         model_name=args.model,
         epochs=args.epochs,
@@ -124,7 +232,8 @@ def cmd_train_embedder(args: argparse.Namespace) -> None:
         max_seq_length=args.max_seq_length,
         use_lora=not args.disable_lora,
         tracking_backend=args.tracking_backend,
-        experiment_name=args.experiment_name,
+        experiment_name=run_name,
+        eval_every_epoch=args.eval_every_epoch,
     )
     manifest = train_biencoder(
         train_rows,
@@ -133,6 +242,7 @@ def cmd_train_embedder(args: argparse.Namespace) -> None:
         Path(args.out_dir),
         cfg,
         corpus_hash=sha256_file(Path(args.corpus)),
+        benchmark_sets=benchmark_sets,
     )
     print(json.dumps({"model_dir": str(Path(args.out_dir).resolve()), **manifest}, indent=2))
 
@@ -175,6 +285,55 @@ def cmd_eval_retrieval(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def cmd_run_benchmark(args: argparse.Namespace) -> None:
+    corpus_rows = _load_corpus(Path(args.corpus))
+    out_dir = Path(args.out_dir)
+    summary = run_benchmarks(Path(args.benchmark_dir), corpus_rows, args.model, out_dir)
+
+    if args.tracking_backend == "wandb":
+        try:
+            import wandb
+
+            table = wandb.Table(columns=["benchmark", "recall@5", "mrr@10", "ndcg@10", "count"])
+            for name, vals in summary.items():
+                table.add_data(name, vals["recall@5"], vals["mrr@10"], vals["ndcg@10"], vals["count"])
+                wandb.log(
+                    {
+                        f"benchmark/{name}/recall@5": vals["recall@5"],
+                        f"benchmark/{name}/mrr@10": vals["mrr@10"],
+                        f"benchmark/{name}/ndcg@10": vals["ndcg@10"],
+                    }
+                )
+            wandb.log({"benchmark/summary_table": table})
+        except Exception:
+            pass
+
+    print(json.dumps(summary, indent=2))
+
+
+def cmd_plot_metrics(args: argparse.Namespace) -> None:
+    out_dir = Path(args.out_dir)
+    ensure_dir(out_dir)
+
+    output = {}
+    if args.epoch_metrics:
+        output.update(plot_epoch_metrics(Path(args.epoch_metrics), out_dir))
+    if args.benchmark_summary:
+        output.update(plot_benchmark_comparison(Path(args.benchmark_summary), out_dir))
+
+    if args.tracking_backend == "wandb":
+        try:
+            import wandb
+
+            for key, path in output.items():
+                if path.endswith(".png"):
+                    wandb.log({key: wandb.Image(path)})
+        except Exception:
+            pass
+
+    print(json.dumps(output, indent=2))
+
+
 def cmd_build_ann_index(args: argparse.Namespace) -> None:
     corpus_rows = _load_corpus(Path(args.corpus))
     config = build_index(corpus_rows, args.model, Path(args.out_dir))
@@ -196,8 +355,39 @@ def _parser() -> argparse.ArgumentParser:
     p_corpus.add_argument("--out-dir", required=True)
     p_corpus.set_defaults(func=cmd_build_corpus)
 
+    p_seed = sub.add_parser("generate-openai-seed")
+    p_seed.add_argument("--corpus", required=True)
+    p_seed.add_argument("--out-dir", required=True)
+    p_seed.add_argument("--config")
+    p_seed.add_argument("--model")
+    p_seed.add_argument("--temperature", type=float)
+    p_seed.add_argument("--retries", type=int)
+    p_seed.add_argument("--items-per-type", type=int)
+    p_seed.add_argument("--seed", type=int, default=42)
+    p_seed.add_argument("--api-key")
+    p_seed.add_argument("--mock-responses-path")
+    p_seed.set_defaults(func=cmd_generate_openai_seed)
+
+    p_ds = sub.add_parser("build-dataset")
+    p_ds.add_argument("--corpus", required=True)
+    p_ds.add_argument("--openai-seed", required=True)
+    p_ds.add_argument("--out-dir", required=True)
+    p_ds.add_argument("--config")
+    p_ds.add_argument("--version", type=int, default=1)
+    p_ds.add_argument("--seed", type=int, default=42)
+    p_ds.add_argument("--train-ratio", type=float)
+    p_ds.add_argument("--val-ratio", type=float)
+    p_ds.add_argument("--target-train-min", type=int)
+    p_ds.add_argument("--target-train-max", type=int)
+    p_ds.add_argument("--schema-hash")
+    p_ds.add_argument("--schema-hash-file")
+    p_ds.add_argument("--openai-model", default="gpt-4o-mini")
+    p_ds.set_defaults(func=cmd_build_dataset)
+
     p_gen = sub.add_parser("generate-synthetic")
     p_gen.add_argument("--corpus", required=True)
+    p_gen.add_argument("--seed-source", choices=["local", "openai"], default="local")
+    p_gen.add_argument("--openai-seed")
     p_gen.add_argument("--seed", type=int, default=42)
     p_gen.add_argument("--max-expansions", type=int, default=6)
     p_gen.add_argument("--train-ratio", type=float, default=0.8)
@@ -226,6 +416,9 @@ def _parser() -> argparse.ArgumentParser:
     p_train.add_argument("--disable-lora", action="store_true")
     p_train.add_argument("--tracking-backend", choices=["none", "wandb", "mlflow"], default="none")
     p_train.add_argument("--experiment-name", default="graphql-embedder-finetune")
+    p_train.add_argument("--run-name")
+    p_train.add_argument("--eval-every-epoch", action="store_true")
+    p_train.add_argument("--benchmark-dir")
     p_train.add_argument("--out-dir", required=True)
     p_train.set_defaults(func=cmd_train_embedder)
 
@@ -237,6 +430,21 @@ def _parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--tuned-model", required=True)
     p_eval.add_argument("--out-dir", required=True)
     p_eval.set_defaults(func=cmd_eval_retrieval)
+
+    p_bench = sub.add_parser("run-benchmark")
+    p_bench.add_argument("--benchmark-dir", required=True)
+    p_bench.add_argument("--corpus", required=True)
+    p_bench.add_argument("--model", required=True)
+    p_bench.add_argument("--tracking-backend", choices=["none", "wandb"], default="none")
+    p_bench.add_argument("--out-dir", required=True)
+    p_bench.set_defaults(func=cmd_run_benchmark)
+
+    p_plot = sub.add_parser("plot-metrics")
+    p_plot.add_argument("--epoch-metrics")
+    p_plot.add_argument("--benchmark-summary")
+    p_plot.add_argument("--tracking-backend", choices=["none", "wandb"], default="none")
+    p_plot.add_argument("--out-dir", required=True)
+    p_plot.set_defaults(func=cmd_plot_metrics)
 
     p_idx = sub.add_parser("build-ann-index")
     p_idx.add_argument("--corpus", required=True)

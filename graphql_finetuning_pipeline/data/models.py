@@ -44,6 +44,10 @@ class QueryRecord(BaseModel):
     source: str
     family_id: str
     quality_score: float
+    intent: str | None = None
+    difficulty: str | None = None
+    confuser_type_ids: list[str] = Field(default_factory=list)
+    rationale_tags: list[str] = Field(default_factory=list)
     negatives_easy: list[str] = Field(default_factory=list)
     negatives_medium: list[str] = Field(default_factory=list)
     negatives_hard: list[str] = Field(default_factory=list)
