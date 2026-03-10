@@ -1,0 +1,32 @@
+"Root query type"
+type Query {
+  user(id: ID!): User
+  users(limit: Int, offset: Int): [User!]!
+  order(id: ID!): Order
+  orders(status: OrderStatus): [Order!]!
+}
+
+type User implements Node {
+  id: ID!
+  email: String!
+  displayName: String
+  orders(limit: Int): [Order!]!
+}
+
+type Order implements Node {
+  id: ID!
+  orderNumber: String!
+  totalAmount: Float!
+  status: OrderStatus!
+  customer: User!
+}
+
+interface Node {
+  id: ID!
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  CANCELLED
+}

@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "graphql-finetuning-pipeline"
+version = "0.1.0"
+description = "GraphQL type retrieval embedding finetuning pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "GraphQL Finetuning" }]
+dependencies = [
+  "graphql-core>=3.2.3",
+  "pydantic>=2.8.0",
+  "numpy>=1.26.0",
+  "scikit-learn>=1.5.0",
+  "sentence-transformers>=3.0.0",
+  "transformers>=4.43.0",
+  "datasets>=2.20.0",
+  "peft>=0.11.0",
+  "torch>=2.2.0",
+  "tqdm>=4.66.0",
+  "pyyaml>=6.0.1",
+]
+
+[project.optional-dependencies]
+faiss = ["faiss-cpu>=1.8.0"]
+wandb = ["wandb>=0.17.0"]
+mlflow = ["mlflow>=2.14.0"]
+dev = ["pytest>=8.2.0", "ruff>=0.5.0", "mypy>=1.10.0"]
+
+[project.scripts]
+graphft = "graphql_finetuning_pipeline.cli.main:main"
+
+[tool.setuptools]
+packages = ["graphql_finetuning_pipeline", "graphql_finetuning_pipeline.cli", "graphql_finetuning_pipeline.data", "graphql_finetuning_pipeline.training", "graphql_finetuning_pipeline.retrieval", "graphql_finetuning_pipeline.eval", "graphql_finetuning_pipeline.utils"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
