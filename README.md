@@ -1,18 +1,14 @@
 # GraphQL Finetuning Pipeline
 
-Pipeline for finetuning embedding models (default: `Qwen/Qwen3-Embedding-0.6B`) to retrieve GraphQL types from user queries.
+Synthetic-schema-first pipeline for training an embedding model to retrieve relevant GraphQL types for user questions where users do **not** know schema/type names.
 
-## What it supports
+## Core approach
 
-- Schema ingestion and corpus construction from SDL/introspection
-- OpenAI-seeded query generation (`gpt-4o-mini` default)
-- Deterministic local augmentation + quality gates
-- Versioned dataset building (`artifacts/datasets/v{n}`)
-- Bi-encoder finetuning with optional epoch-end benchmark evaluation
-- Baseline-vs-tuned retrieval eval
-- Multi-suite benchmark evaluation with slice metrics
-- Local plot generation + optional W&B logging
-- ANN index build for deployment
+- Generate many synthetic schema worlds (domains like hotels/shopping/cars/fintech/etc.)
+- Generate schema-oblivious user questions with multi-relevant type labels
+- Train retrieval model with multi-positive supervision
+- Evaluate on held-out worlds with realism/adversarial/compositional benchmarks
+- Track metrics and plots locally and optionally in W&B
 
 ## Install
 
@@ -24,25 +20,22 @@ python -m pip install -e '.[dev,wandb]'
 
 ## Environment
 
-Create `.env` with at least:
-
 ```bash
 OPENAI_API_KEY=...
 WANDB_API_KEY=...
 ```
 
-Load env vars:
+Load vars:
 
 ```bash
 source .venv/bin/activate
 set -a; source .env; set +a
 ```
 
-## Fast path (Make targets)
+## Quick workflow
 
 ```bash
 make ingest-schema
-make build-corpus
 make generate-openai-seed
 make build-dataset
 make train-embedder
@@ -52,33 +45,29 @@ make plot-metrics
 make build-ann-index
 ```
 
-## Full CLI examples
+## Main commands
 
-### 1) Ingest and build corpus
-
-```bash
-graphft ingest-schema --input examples/schema.graphql --out-dir artifacts
-graphft build-corpus --normalized artifacts/normalized_types.jsonl --out-dir artifacts
-```
-
-### 2) OpenAI seed generation
+### 1) Generate synthetic schema worlds + seed queries
 
 ```bash
 graphft generate-openai-seed \
-  --corpus artifacts/corpus/types_v1.jsonl \
   --out-dir artifacts \
+  --version 1 \
   --config examples/pipeline_config.yaml
 ```
 
 Outputs:
-- `artifacts/openai/raw_seed_responses.jsonl`
+- `artifacts/worlds/v1/world_<id>/schema.graphql`
+- `artifacts/worlds/v1/world_<id>/type_catalog.json`
+- `artifacts/worlds/v1/manifest.json`
+- `artifacts/corpus/types_worlds_v1.jsonl`
 - `artifacts/openai/seed_pairs_v1.jsonl`
 
-### 3) Build versioned dataset
+### 2) Build train/val/test dataset from world-seeded queries
 
 ```bash
 graphft build-dataset \
-  --corpus artifacts/corpus/types_v1.jsonl \
+  --corpus artifacts/corpus/types_worlds_v1.jsonl \
   --openai-seed artifacts/openai/seed_pairs_v1.jsonl \
   --schema-hash-file artifacts/metadata/schema_hash.json \
   --out-dir artifacts \
@@ -88,16 +77,17 @@ graphft build-dataset \
 
 Outputs:
 - `artifacts/datasets/v1/{train,val,test}.jsonl`
-- `artifacts/datasets/v1/benchmarks/{synthetic_holdout,realism_eval,adversarial_eval}.jsonl`
+- `artifacts/datasets/v1/corpus.jsonl`
+- `artifacts/datasets/v1/benchmarks/{realism_eval,adversarial_eval,compositional_eval}.jsonl`
 - `artifacts/datasets/v1/manifest.json`
 
-### 4) Train with W&B and epoch benchmark logging
+### 3) Train embedder (epoch benchmark logging)
 
 ```bash
 graphft train-embedder \
   --train artifacts/datasets/v1/train.jsonl \
   --val artifacts/datasets/v1/val.jsonl \
-  --corpus artifacts/corpus/types_v1.jsonl \
+  --corpus artifacts/datasets/v1/corpus.jsonl \
   --model Qwen/Qwen3-Embedding-0.6B \
   --epochs 3 \
   --batch-size 16 \
@@ -110,26 +100,23 @@ graphft train-embedder \
   --out-dir artifacts/models/qwen3-embedding-0.6b-ft
 ```
 
-Epoch metrics output:
-- `artifacts/models/qwen3-embedding-0.6b-ft/metrics/epoch_metrics.jsonl`
-
-### 5) Baseline vs tuned eval
+### 4) Baseline vs tuned test-set evaluation
 
 ```bash
 graphft eval-retrieval \
   --eval-set artifacts/datasets/v1/test.jsonl \
-  --corpus artifacts/corpus/types_v1.jsonl \
+  --corpus artifacts/datasets/v1/corpus.jsonl \
   --base-model Qwen/Qwen3-Embedding-0.6B \
   --tuned-model artifacts/models/qwen3-embedding-0.6b-ft \
   --out-dir artifacts/eval
 ```
 
-### 6) Benchmark suites and plots
+### 5) Benchmarks + plots
 
 ```bash
 graphft run-benchmark \
   --benchmark-dir artifacts/datasets/v1/benchmarks \
-  --corpus artifacts/corpus/types_v1.jsonl \
+  --corpus artifacts/datasets/v1/corpus.jsonl \
   --model artifacts/models/qwen3-embedding-0.6b-ft \
   --tracking-backend wandb \
   --out-dir artifacts/eval/benchmarks
@@ -141,63 +128,42 @@ graphft plot-metrics \
   --out-dir artifacts/eval/plots
 ```
 
-### 7) Build ANN index
+### 6) Build ANN index
 
 ```bash
 graphft build-ann-index \
-  --corpus artifacts/corpus/types_v1.jsonl \
+  --corpus artifacts/datasets/v1/corpus.jsonl \
   --model artifacts/models/qwen3-embedding-0.6b-ft \
   --out-dir artifacts/index
 ```
 
-## Create ~100 OpenAI-seeded training entries (example)
+## Label format in dataset rows
+
+Each query row can include:
+- `world_id`, `domain`, `query`
+- `primary_type_id`
+- `relevant_type_ids` (2-5)
+- `relation_pair` (`primary`, `bridge`)
+- `difficulty`, `noise_tags`, `adversarial_tags`, `negative_type_ids`
+
+## Metrics
+
+- Core: `recall@1/5/10`, `mrr@10`, `ndcg@10`
+- Set/pair: `set_recall_any@5`, `set_recall_all@10`, `coverage@10`, `pair_recall@10`
+- Transfer: `seen_vs_unseen_recall@5_gap`
+
+## Offline generation/testing
+
+Use mocked OpenAI responses:
 
 ```bash
-graphft generate-openai-seed \
-  --corpus artifacts/corpus/types_v1.jsonl \
-  --out-dir artifacts \
-  --items-per-type 10
-
-graphft build-dataset \
-  --corpus artifacts/corpus/types_v1.jsonl \
-  --openai-seed artifacts/openai/seed_pairs_v1.jsonl \
-  --schema-hash-file artifacts/metadata/schema_hash.json \
-  --out-dir artifacts \
-  --version 3 \
-  --target-train-min 100 \
-  --target-train-max 100
+graphft generate-openai-seed --out-dir artifacts --version 1 --mock-responses-path /path/mock.jsonl
 ```
-
-Check counts:
-
-```bash
-wc -l artifacts/datasets/v3/train.jsonl artifacts/datasets/v3/val.jsonl artifacts/datasets/v3/test.jsonl
-```
-
-## Local synthetic mode (no OpenAI)
-
-```bash
-graphft generate-synthetic \
-  --seed-source local \
-  --corpus artifacts/corpus/types_v1.jsonl \
-  --out-dir artifacts
-```
-
-## Troubleshooting
-
-- `FileNotFoundError: Local model path does not exist ...`
-  - Use an existing trained model dir under `artifacts/models/`.
-- Plotting crashes in restricted environments (font cache issues)
-  - Try:
-    ```bash
-    MPLCONFIGDIR=/tmp XDG_CACHE_HOME=/tmp graphft plot-metrics ...
-    ```
-- If OpenAI generation appears idle
-  - `generate-openai-seed` shows a `tqdm` progress bar per type (`OpenAI seed generation ...`).
 
 ## Notes
 
-- `train-embedder --out-dir <path>` writes a loadable SentenceTransformer model at `<path>`.
-- `eval-retrieval --tuned-model <path>` and `build-ann-index --model <path>` fail fast for missing/invalid local paths.
-- `--disable-lora` is recommended for stable reload behavior in eval/index.
-- Offline testing of OpenAI generation is supported via `--mock-responses-path <jsonl>`.
+- `eval-retrieval` and `build-ann-index` fail fast for invalid local model paths.
+- If plotting fails due cache permissions in restricted envs, try:
+  ```bash
+  MPLCONFIGDIR=/tmp XDG_CACHE_HOME=/tmp graphft plot-metrics ...
+  ```

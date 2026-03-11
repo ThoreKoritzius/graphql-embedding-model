@@ -13,6 +13,8 @@ def _row(query_id: str, query: str, family: str = "f1") -> QueryRecord:
         quality_score=0.9,
         intent="lookup",
         difficulty="medium",
+        world_id=f"world-{family}",
+        relevant_type_ids=["User"],
     )
 
 
@@ -24,8 +26,9 @@ def test_semantic_dedupe_reduces_near_duplicates():
 
 def test_leakage_filter_drops_family_with_high_leakage():
     rows = [_row("1", "what is User type", "fam-a"), _row("2", "show User fields", "fam-a"), _row("3", "fetch account details", "fam-b")]
-    out = leakage_filter(rows, type_names={"User"}, threshold=0.5)
-    assert all(r.family_id != "fam-a" for r in out)
+    out = leakage_filter(rows, canonical_names={"User"}, threshold=0.5)
+    assert len(out) == 1
+    assert out[0].query_id == "3"
 
 
 def test_ambiguity_filter_drops_vague_queries():

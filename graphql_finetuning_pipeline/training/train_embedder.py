@@ -52,10 +52,15 @@ def _maybe_attach_lora(model: SentenceTransformer, rank: int = 16) -> None:
 def _build_pair_rows(rows: list[QueryRecord], type_to_doc: dict[str, str]) -> list[dict[str, str]]:
     pairs: list[dict[str, str]] = []
     for row in rows:
-        target_doc = type_to_doc.get(row.target_type_id)
-        if not target_doc:
+        primary = row.primary_type_id or row.target_type_id
+        positives = row.relevant_type_ids or [primary]
+        positives = [p for p in positives if p in type_to_doc]
+        if primary in type_to_doc and primary not in positives:
+            positives.insert(0, primary)
+        if not positives:
             continue
-        pairs.append({"anchor": row.query, "positive": target_doc})
+        for p in positives:
+            pairs.append({"anchor": row.query, "positive": type_to_doc[p]})
     return pairs
 
 

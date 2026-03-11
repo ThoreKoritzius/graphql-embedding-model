@@ -10,7 +10,15 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 from graphql_finetuning_pipeline.data.models import CorpusRecord, QueryRecord
-from graphql_finetuning_pipeline.eval.metrics import aggregate, mrr_at_k, ndcg_at_k, recall_at_k
+from graphql_finetuning_pipeline.eval.metrics import (
+    aggregate,
+    coverage_at_k,
+    mrr_at_k,
+    ndcg_at_k,
+    pair_recall_at_k,
+    recall_at_k,
+    set_recall_at_k,
+)
 from graphql_finetuning_pipeline.utils.embeddings import encode_with_resolution
 from graphql_finetuning_pipeline.utils.io import ensure_dir, read_jsonl
 
@@ -57,8 +65,13 @@ def evaluate_benchmark_set(
             "recall@10": 0.0,
             "mrr@10": 0.0,
             "ndcg@10": 0.0,
+            "set_recall_any@5": 0.0,
+            "set_recall_all@10": 0.0,
+            "coverage@10": 0.0,
+            "pair_recall@10": 0.0,
             "embedding_latency_seconds": {"corpus": 0.0, "queries": 0.0},
             "slice_metrics": {},
+            "transfer_gap": {"seen_vs_unseen_recall@5_gap": 0.0},
             "per_query": [],
         }
 
@@ -91,8 +104,29 @@ def evaluate_benchmark_set(
                 "recall@10": recall_at_k(ranked_ids, row.target_type_id, 10),
                 "mrr@10": mrr_at_k(ranked_ids, row.target_type_id, 10),
                 "ndcg@10": ndcg_at_k(ranked_ids, row.target_type_id, 10),
+                "set_recall_any@5": set_recall_at_k(
+                    ranked_ids, row.relevant_type_ids or [row.primary_type_id or row.target_type_id], 5, mode="any"
+                ),
+                "set_recall_all@10": set_recall_at_k(
+                    ranked_ids, row.relevant_type_ids or [row.primary_type_id or row.target_type_id], 10, mode="all"
+                ),
+                "coverage@10": coverage_at_k(
+                    ranked_ids, row.relevant_type_ids or [row.primary_type_id or row.target_type_id], 10
+                ),
+                "pair_recall@10": pair_recall_at_k(
+                    ranked_ids,
+                    (row.relation_pair or {}).get("primary", ""),
+                    (row.relation_pair or {}).get("bridge", ""),
+                    10,
+                ),
+                "world_split": row.world_split or "unknown",
             }
         )
+
+    seen = [x for x in per_query if x.get("world_split") == "train"]
+    unseen = [x for x in per_query if x.get("world_split") in {"val", "test"}]
+    seen_recall5 = aggregate([x["recall@5"] for x in seen]) if seen else 0.0
+    unseen_recall5 = aggregate([x["recall@5"] for x in unseen]) if unseen else 0.0
 
     summary = {
         "count": len(rows),
@@ -101,11 +135,16 @@ def evaluate_benchmark_set(
         "recall@10": aggregate([x["recall@10"] for x in per_query]),
         "mrr@10": aggregate([x["mrr@10"] for x in per_query]),
         "ndcg@10": aggregate([x["ndcg@10"] for x in per_query]),
+        "set_recall_any@5": aggregate([x["set_recall_any@5"] for x in per_query]),
+        "set_recall_all@10": aggregate([x["set_recall_all@10"] for x in per_query]),
+        "coverage@10": aggregate([x["coverage@10"] for x in per_query]),
+        "pair_recall@10": aggregate([x["pair_recall@10"] for x in per_query]),
         "embedding_latency_seconds": {
             "corpus": t1 - t0,
             "queries": t2 - t1,
         },
         "slice_metrics": _slice_metrics(per_query),
+        "transfer_gap": {"seen_vs_unseen_recall@5_gap": seen_recall5 - unseen_recall5},
         "per_query": per_query,
     }
     return summary

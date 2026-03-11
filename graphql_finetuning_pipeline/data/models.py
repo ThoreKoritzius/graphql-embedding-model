@@ -44,6 +44,15 @@ class QueryRecord(BaseModel):
     source: str
     family_id: str
     quality_score: float
+    world_id: str | None = None
+    domain: str | None = None
+    world_split: str | None = None
+    primary_type_id: str | None = None
+    relevant_type_ids: list[str] = Field(default_factory=list)
+    relation_pair: dict[str, str] | None = None
+    noise_tags: list[str] = Field(default_factory=list)
+    adversarial_tags: list[str] = Field(default_factory=list)
+    negative_type_ids: list[str] = Field(default_factory=list)
     intent: str | None = None
     difficulty: str | None = None
     confuser_type_ids: list[str] = Field(default_factory=list)

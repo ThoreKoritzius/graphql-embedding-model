@@ -90,19 +90,22 @@ def cmd_build_corpus(args: argparse.Namespace) -> None:
 
 
 def cmd_generate_openai_seed(args: argparse.Namespace) -> None:
-    corpus = _load_corpus(Path(args.corpus))
     ycfg = _load_yaml(Path(args.config) if args.config else None)
     ocfg = ycfg.get("openai", {})
+    wcfg = ycfg.get("worlds", {})
 
     cfg = OpenAISeedConfig(
         model=args.model or ocfg.get("model", "gpt-4o-mini"),
         temperature=args.temperature if args.temperature is not None else float(ocfg.get("temperature", 0.7)),
         retries=args.retries if args.retries is not None else int(ocfg.get("retries", 3)),
-        items_per_type=args.items_per_type if args.items_per_type is not None else int(ocfg.get("items_per_type", 24)),
+        items_per_world=args.items_per_world if args.items_per_world is not None else int(ocfg.get("items_per_world", 240)),
+        worlds_version=args.version,
+        world_count=args.world_count if args.world_count is not None else int(wcfg.get("world_count", 60)),
+        min_types_per_world=args.min_types if args.min_types is not None else int(wcfg.get("min_types", 20)),
+        max_types_per_world=args.max_types if args.max_types is not None else int(wcfg.get("max_types", 36)),
     )
 
-    rows, raw = generate_openai_seed(
-        corpus=corpus,
+    rows, raw, corpus_rows = generate_openai_seed(
         out_dir=Path(args.out_dir),
         cfg=cfg,
         seed=args.seed,
@@ -114,8 +117,13 @@ def cmd_generate_openai_seed(args: argparse.Namespace) -> None:
             {
                 "seed_pairs": len(rows),
                 "raw_logs": len(raw),
+                "worlds_version": args.version,
+                "world_count": cfg.world_count,
+                "corpus_rows": len(corpus_rows),
                 "seed_pairs_path": str(Path(args.out_dir) / "openai" / "seed_pairs_v1.jsonl"),
                 "raw_path": str(Path(args.out_dir) / "openai" / "raw_seed_responses.jsonl"),
+                "world_manifest": str(Path(args.out_dir) / "worlds" / f"v{args.version}" / "manifest.json"),
+                "generated_corpus": str(Path(args.out_dir) / "corpus" / f"types_worlds_v{args.version}.jsonl"),
             },
             indent=2,
         )
@@ -123,15 +131,14 @@ def cmd_generate_openai_seed(args: argparse.Namespace) -> None:
 
 
 def cmd_build_dataset(args: argparse.Namespace) -> None:
-    corpus = _load_corpus(Path(args.corpus))
+    corpus_path = Path(args.corpus) if args.corpus else Path(args.out_dir) / "corpus" / f"types_worlds_v{args.version}.jsonl"
+    corpus = _load_corpus(corpus_path)
     seed_rows = _load_queries(Path(args.openai_seed))
     cfg_yaml = _load_yaml(Path(args.config) if args.config else None)
     dcfg = cfg_yaml.get("dataset", {})
 
     cfg = DatasetBuildConfig(
         version=args.version,
-        train_ratio=args.train_ratio if args.train_ratio is not None else float(dcfg.get("train_ratio", 0.8)),
-        val_ratio=args.val_ratio if args.val_ratio is not None else float(dcfg.get("val_ratio", 0.1)),
         seed=args.seed,
         target_train_min=args.target_train_min if args.target_train_min is not None else int(dcfg.get("target_train_min", 20000)),
         target_train_max=args.target_train_max if args.target_train_max is not None else int(dcfg.get("target_train_max", 50000)),
@@ -157,7 +164,7 @@ def cmd_build_dataset(args: argparse.Namespace) -> None:
         cfg=cfg,
         generation_config=generation_config,
     )
-    print(json.dumps(manifest, indent=2))
+    print(json.dumps({**manifest, "corpus_path": str(corpus_path)}, indent=2))
 
 
 def cmd_generate_synthetic(args: argparse.Namespace) -> None:
@@ -294,14 +301,24 @@ def cmd_run_benchmark(args: argparse.Namespace) -> None:
         try:
             import wandb
 
-            table = wandb.Table(columns=["benchmark", "recall@5", "mrr@10", "ndcg@10", "count"])
+            table = wandb.Table(columns=["benchmark", "recall@5", "mrr@10", "ndcg@10", "set_recall_any@5", "pair_recall@10", "count"])
             for name, vals in summary.items():
-                table.add_data(name, vals["recall@5"], vals["mrr@10"], vals["ndcg@10"], vals["count"])
+                table.add_data(
+                    name,
+                    vals["recall@5"],
+                    vals["mrr@10"],
+                    vals["ndcg@10"],
+                    vals.get("set_recall_any@5", 0.0),
+                    vals.get("pair_recall@10", 0.0),
+                    vals["count"],
+                )
                 wandb.log(
                     {
                         f"benchmark/{name}/recall@5": vals["recall@5"],
                         f"benchmark/{name}/mrr@10": vals["mrr@10"],
                         f"benchmark/{name}/ndcg@10": vals["ndcg@10"],
+                        f"benchmark/{name}/set_recall_any@5": vals.get("set_recall_any@5", 0.0),
+                        f"benchmark/{name}/pair_recall@10": vals.get("pair_recall@10", 0.0),
                     }
                 )
             wandb.log({"benchmark/summary_table": table})
@@ -356,27 +373,28 @@ def _parser() -> argparse.ArgumentParser:
     p_corpus.set_defaults(func=cmd_build_corpus)
 
     p_seed = sub.add_parser("generate-openai-seed")
-    p_seed.add_argument("--corpus", required=True)
     p_seed.add_argument("--out-dir", required=True)
     p_seed.add_argument("--config")
+    p_seed.add_argument("--version", type=int, default=1)
+    p_seed.add_argument("--world-count", type=int)
+    p_seed.add_argument("--min-types", type=int)
+    p_seed.add_argument("--max-types", type=int)
     p_seed.add_argument("--model")
     p_seed.add_argument("--temperature", type=float)
     p_seed.add_argument("--retries", type=int)
-    p_seed.add_argument("--items-per-type", type=int)
+    p_seed.add_argument("--items-per-world", type=int)
     p_seed.add_argument("--seed", type=int, default=42)
     p_seed.add_argument("--api-key")
     p_seed.add_argument("--mock-responses-path")
     p_seed.set_defaults(func=cmd_generate_openai_seed)
 
     p_ds = sub.add_parser("build-dataset")
-    p_ds.add_argument("--corpus", required=True)
+    p_ds.add_argument("--corpus")
     p_ds.add_argument("--openai-seed", required=True)
     p_ds.add_argument("--out-dir", required=True)
     p_ds.add_argument("--config")
     p_ds.add_argument("--version", type=int, default=1)
     p_ds.add_argument("--seed", type=int, default=42)
-    p_ds.add_argument("--train-ratio", type=float)
-    p_ds.add_argument("--val-ratio", type=float)
     p_ds.add_argument("--target-train-min", type=int)
     p_ds.add_argument("--target-train-max", type=int)
     p_ds.add_argument("--schema-hash")

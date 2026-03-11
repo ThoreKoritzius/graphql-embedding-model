@@ -8,7 +8,15 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 from graphql_finetuning_pipeline.data.models import CorpusRecord, QueryRecord
-from graphql_finetuning_pipeline.eval.metrics import aggregate, mrr_at_k, ndcg_at_k, recall_at_k
+from graphql_finetuning_pipeline.eval.metrics import (
+    aggregate,
+    coverage_at_k,
+    mrr_at_k,
+    ndcg_at_k,
+    pair_recall_at_k,
+    recall_at_k,
+    set_recall_at_k,
+)
 from graphql_finetuning_pipeline.utils.embeddings import encode_with_resolution
 from graphql_finetuning_pipeline.utils.io import ensure_dir
 
@@ -34,6 +42,7 @@ def evaluate(
 
     sims = cosine_similarity(query_emb, corpus_emb)
     r1, r5, r10, mrr10, ndcg10 = [], [], [], [], []
+    set_any5, set_all10, cov10, pair10 = [], [], [], []
 
     for i, row in enumerate(eval_rows):
         ranked_idx = np.argsort(-sims[i])
@@ -43,6 +52,12 @@ def evaluate(
         r10.append(recall_at_k(ranked_ids, row.target_type_id, 10))
         mrr10.append(mrr_at_k(ranked_ids, row.target_type_id, 10))
         ndcg10.append(ndcg_at_k(ranked_ids, row.target_type_id, 10))
+        relevant = row.relevant_type_ids or [row.primary_type_id or row.target_type_id]
+        set_any5.append(set_recall_at_k(ranked_ids, relevant, 5, mode="any"))
+        set_all10.append(set_recall_at_k(ranked_ids, relevant, 10, mode="all"))
+        cov10.append(coverage_at_k(ranked_ids, relevant, 10))
+        pair = row.relation_pair or {}
+        pair10.append(pair_recall_at_k(ranked_ids, pair.get("primary", ""), pair.get("bridge", ""), 10))
 
     metrics = {
         "count": len(eval_rows),
@@ -51,6 +66,10 @@ def evaluate(
         "recall@10": aggregate(r10),
         "mrr@10": aggregate(mrr10),
         "ndcg@10": aggregate(ndcg10),
+        "set_recall_any@5": aggregate(set_any5),
+        "set_recall_all@10": aggregate(set_all10),
+        "coverage@10": aggregate(cov10),
+        "pair_recall@10": aggregate(pair10),
         "embedding_latency_seconds": {
             "corpus": t1 - t0,
             "queries": t2 - t1,

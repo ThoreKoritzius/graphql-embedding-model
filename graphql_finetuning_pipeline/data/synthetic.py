@@ -126,6 +126,10 @@ def expand_queries(seed_queries: list[QueryRecord], max_expansions_per_seed: int
                     source=source,
                     family_id=q.family_id,
                     quality_score=score,
+                    intent=q.intent,
+                    difficulty=q.difficulty,
+                    confuser_type_ids=list(q.confuser_type_ids),
+                    rationale_tags=list(q.rationale_tags),
                 )
             )
     return expanded

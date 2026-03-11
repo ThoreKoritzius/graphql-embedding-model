@@ -27,3 +27,29 @@ def ndcg_at_k(ranked: list[str], target: str, k: int) -> float:
 def aggregate(metric_values: Iterable[float]) -> float:
     vals = list(metric_values)
     return sum(vals) / len(vals) if vals else 0.0
+
+
+def set_recall_at_k(ranked: list[str], relevant: list[str], k: int, mode: str = "any") -> float:
+    rel = [x for x in relevant if x]
+    if not rel:
+        return 0.0
+    top = set(ranked[:k])
+    if mode == "all":
+        return 1.0 if all(x in top for x in rel) else 0.0
+    return 1.0 if any(x in top for x in rel) else 0.0
+
+
+def coverage_at_k(ranked: list[str], relevant: list[str], k: int) -> float:
+    rel = [x for x in relevant if x]
+    if not rel:
+        return 0.0
+    top = set(ranked[:k])
+    hit = sum(1 for x in rel if x in top)
+    return hit / len(rel)
+
+
+def pair_recall_at_k(ranked: list[str], primary: str, bridge: str, k: int) -> float:
+    top = set(ranked[:k])
+    if not primary or not bridge:
+        return 0.0
+    return 1.0 if primary in top and bridge in top else 0.0

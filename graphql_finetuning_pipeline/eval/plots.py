@@ -37,7 +37,19 @@ def plot_epoch_metrics(epoch_metrics_path: Path, out_dir: Path) -> dict[str, str
 
     csv_path = out_dir / "epoch_metrics.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["epoch", "benchmark", "recall@5", "mrr@10", "ndcg@10"])
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "epoch",
+                "benchmark",
+                "recall@5",
+                "mrr@10",
+                "ndcg@10",
+                "set_recall_any@5",
+                "coverage@10",
+                "pair_recall@10",
+            ],
+        )
         writer.writeheader()
         for r in rows:
             writer.writerow(
@@ -47,6 +59,9 @@ def plot_epoch_metrics(epoch_metrics_path: Path, out_dir: Path) -> dict[str, str
                     "recall@5": r["recall@5"],
                     "mrr@10": r["mrr@10"],
                     "ndcg@10": r["ndcg@10"],
+                    "set_recall_any@5": r.get("set_recall_any@5", 0.0),
+                    "coverage@10": r.get("coverage@10", 0.0),
+                    "pair_recall@10": r.get("pair_recall@10", 0.0),
                 }
             )
 
@@ -80,6 +95,7 @@ def plot_benchmark_comparison(benchmark_summary_path: Path, out_dir: Path) -> di
     benches = sorted(summary.keys())
     recalls = [summary[b]["recall@5"] for b in benches]
     mrrs = [summary[b]["mrr@10"] for b in benches]
+    transfer_gap = [summary[b].get("transfer_gap", {}).get("seen_vs_unseen_recall@5_gap", 0.0) for b in benches]
 
     csv_path = out_dir / "benchmark_metrics.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as f:
@@ -123,8 +139,20 @@ def plot_benchmark_comparison(benchmark_summary_path: Path, out_dir: Path) -> di
     plt.savefig(heatmap_plot)
     plt.close()
 
+    transfer_plot = out_dir / "transfer_gap.png"
+    plt.figure(figsize=(10, 5))
+    x = list(range(len(benches)))
+    plt.bar(x, transfer_gap)
+    plt.xticks(x, benches, rotation=20)
+    plt.ylabel("Seen-Unseen Recall@5 Gap")
+    plt.title("World Transfer Gap by Benchmark")
+    plt.tight_layout()
+    plt.savefig(transfer_plot)
+    plt.close()
+
     return {
         "benchmark_csv": str(csv_path),
         "benchmark_bar_png": str(bar_plot),
         "slice_heatmap_png": str(heatmap_plot),
+        "transfer_gap_png": str(transfer_plot),
     }

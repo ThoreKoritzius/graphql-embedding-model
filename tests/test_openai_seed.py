@@ -1,10 +1,8 @@
 import json
 from pathlib import Path
 
-from graphql_finetuning_pipeline.data.corpus import build_corpus
 from graphql_finetuning_pipeline.data.dataset_builder import DatasetBuildConfig, build_dataset
 from graphql_finetuning_pipeline.data.openai_seed import OpenAISeedConfig, _extract_json, generate_openai_seed
-from graphql_finetuning_pipeline.data.schema_ingest import parse_schema
 
 
 def test_extract_json_from_markdown_block():
@@ -14,36 +12,43 @@ def test_extract_json_from_markdown_block():
 
 
 def test_mocked_openai_seed_and_dataset_build(tmp_path: Path):
-    rows, _ = parse_schema(Path("examples/schema.graphql"))
-    corpus = build_corpus(rows)[:2]
-
+    world_id = "world_0000"
     mock_line = {
         "items": [
             {
-                "query": "How can I retrieve this entity details from GraphQL?",
-                "target_type_id": corpus[0].type_id,
-                "intent": "lookup",
+                "query": "How can I retrieve this entity details?",
+                "primary_type_id": f"{world_id}:Hotel",
+                "relevant_type_ids": [f"{world_id}:Hotel", f"{world_id}:Booking"],
+                "relation_pair": {"primary": f"{world_id}:Hotel", "bridge": f"{world_id}:Booking"},
                 "difficulty": "medium",
-                "confuser_type_ids": [corpus[1].type_id],
-                "rationale_tags": ["semantic"],
+                "noise_tags": ["typo"],
+                "adversarial_tags": [],
+                "negative_type_ids": [f"{world_id}:Room"],
             },
             {
                 "query": "Which type supports filtered retrieval for this entity?",
-                "target_type_id": corpus[0].type_id,
-                "intent": "filtering",
+                "primary_type_id": f"{world_id}:Booking",
+                "relevant_type_ids": [f"{world_id}:Booking", f"{world_id}:Hotel"],
+                "relation_pair": {"primary": f"{world_id}:Booking", "bridge": f"{world_id}:Hotel"},
                 "difficulty": "hard",
-                "confuser_type_ids": [corpus[1].type_id],
-                "rationale_tags": ["ambiguous"],
+                "noise_tags": [],
+                "adversarial_tags": ["negation"],
+                "negative_type_ids": [f"{world_id}:Guest"],
             },
         ]
     }
     mock_path = tmp_path / "mock_openai.jsonl"
     mock_path.write_text("\n".join([json.dumps(mock_line), json.dumps(mock_line)]), encoding="utf-8")
 
-    out_rows, _ = generate_openai_seed(
-        corpus=corpus,
+    out_rows, _, corpus = generate_openai_seed(
         out_dir=tmp_path,
-        cfg=OpenAISeedConfig(items_per_type=2),
+        cfg=OpenAISeedConfig(
+            items_per_world=2,
+            world_count=2,
+            worlds_version=1,
+            min_types_per_world=20,
+            max_types_per_world=20,
+        ),
         mock_responses_path=mock_path,
     )
     assert len(out_rows) >= 2
@@ -53,7 +58,7 @@ def test_mocked_openai_seed_and_dataset_build(tmp_path: Path):
         corpus=corpus,
         out_dir=tmp_path,
         schema_hash="abc123",
-        cfg=DatasetBuildConfig(version=1, target_train_min=4, target_train_max=20),
+        cfg=DatasetBuildConfig(version=1, target_train_min=20, target_train_max=200),
         generation_config={"openai_model": "gpt-4o-mini"},
     )
     assert manifest["version"] == 1

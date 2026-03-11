@@ -52,6 +52,10 @@ class EpochEvalCallback(TrainerCallback):
                 "recall@10": result["recall@10"],
                 "mrr@10": result["mrr@10"],
                 "ndcg@10": result["ndcg@10"],
+                "set_recall_any@5": result.get("set_recall_any@5", 0.0),
+                "set_recall_all@10": result.get("set_recall_all@10", 0.0),
+                "coverage@10": result.get("coverage@10", 0.0),
+                "pair_recall@10": result.get("pair_recall@10", 0.0),
             }
             records.append(rec)
             self._log_wandb({f"epoch/{name}/recall@5": rec["recall@5"], "epoch": epoch})
