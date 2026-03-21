@@ -3,6 +3,8 @@ openai:
   temperature: 0.8
   retries: 3
   items_per_world: 240
+  request_batch_size: 40
+  max_concurrency: 4
   budget_caps:
     max_requests: 20000
     max_tokens: 15000000

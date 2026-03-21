@@ -2,13 +2,30 @@ import json
 from pathlib import Path
 
 from graphql_finetuning_pipeline.data.dataset_builder import DatasetBuildConfig, build_dataset
-from graphql_finetuning_pipeline.data.openai_seed import OpenAISeedConfig, _extract_json, generate_openai_seed
+from graphql_finetuning_pipeline.data.openai_seed import OpenAISeedConfig, _extract_json, _validate_items, generate_openai_seed
 
 
 def test_extract_json_from_markdown_block():
     text = "```json\n{\"items\": []}\n```"
     parsed = _extract_json(text)
     assert parsed["items"] == []
+
+
+def test_validate_items_accepts_single_item_payload():
+    parsed = {
+        "query": "Find unresolved customer escalations quickly",
+        "primary_type_id": "world_0000:Ticket",
+        "relevant_type_ids": ["world_0000:Ticket", "world_0000:Issue"],
+        "difficulty": "medium",
+        "negative_type_ids": [],
+    }
+    out = _validate_items(
+        parsed=parsed,
+        valid_type_ids={"world_0000:Ticket", "world_0000:Issue"},
+        canonical_names={"Ticket", "Issue"},
+    )
+    assert len(out) == 1
+    assert out[0].primary_type_id == "world_0000:Ticket"
 
 
 def test_mocked_openai_seed_and_dataset_build(tmp_path: Path):

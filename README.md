@@ -53,7 +53,9 @@ make build-ann-index
 graphft generate-openai-seed \
   --out-dir artifacts \
   --version 1 \
-  --config examples/pipeline_config.yaml
+  --config examples/pipeline_config.yaml \
+  --request-batch-size 20 \
+  --max-concurrency 4
 ```
 
 Outputs:
@@ -62,6 +64,13 @@ Outputs:
 - `artifacts/worlds/v1/manifest.json`
 - `artifacts/corpus/types_worlds_v1.jsonl`
 - `artifacts/openai/seed_pairs_v1.jsonl`
+ - live checkpoints during generation:
+   - `artifacts/openai/seed_pairs_v1.partial.jsonl`
+   - `artifacts/openai/raw_seed_responses.partial.jsonl`
+
+Notes:
+- `--request-batch-size` controls examples requested per API call.
+- `--max-concurrency` controls parallel API calls per world.
 
 ### 2) Build train/val/test dataset from world-seeded queries
 

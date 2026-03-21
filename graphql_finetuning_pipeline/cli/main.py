@@ -99,6 +99,8 @@ def cmd_generate_openai_seed(args: argparse.Namespace) -> None:
         temperature=args.temperature if args.temperature is not None else float(ocfg.get("temperature", 0.7)),
         retries=args.retries if args.retries is not None else int(ocfg.get("retries", 3)),
         items_per_world=args.items_per_world if args.items_per_world is not None else int(ocfg.get("items_per_world", 240)),
+        request_batch_size=args.request_batch_size if args.request_batch_size is not None else int(ocfg.get("request_batch_size", 40)),
+        max_concurrency=args.max_concurrency if args.max_concurrency is not None else int(ocfg.get("max_concurrency", 4)),
         worlds_version=args.version,
         world_count=args.world_count if args.world_count is not None else int(wcfg.get("world_count", 60)),
         min_types_per_world=args.min_types if args.min_types is not None else int(wcfg.get("min_types", 20)),
@@ -119,6 +121,8 @@ def cmd_generate_openai_seed(args: argparse.Namespace) -> None:
                 "raw_logs": len(raw),
                 "worlds_version": args.version,
                 "world_count": cfg.world_count,
+                "request_batch_size": cfg.request_batch_size,
+                "max_concurrency": cfg.max_concurrency,
                 "corpus_rows": len(corpus_rows),
                 "seed_pairs_path": str(Path(args.out_dir) / "openai" / "seed_pairs_v1.jsonl"),
                 "raw_path": str(Path(args.out_dir) / "openai" / "raw_seed_responses.jsonl"),
@@ -383,6 +387,8 @@ def _parser() -> argparse.ArgumentParser:
     p_seed.add_argument("--temperature", type=float)
     p_seed.add_argument("--retries", type=int)
     p_seed.add_argument("--items-per-world", type=int)
+    p_seed.add_argument("--request-batch-size", type=int)
+    p_seed.add_argument("--max-concurrency", type=int)
     p_seed.add_argument("--seed", type=int, default=42)
     p_seed.add_argument("--api-key")
     p_seed.add_argument("--mock-responses-path")
