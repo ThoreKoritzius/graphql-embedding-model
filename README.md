@@ -6,7 +6,7 @@ Synthetic-schema-first pipeline for training an embedding model to retrieve rele
 
 - Generate many synthetic schema worlds (domains like hotels/shopping/cars/fintech/etc.)
 - Generate schema-oblivious user questions with multi-relevant type labels
-- Train retrieval model with multi-positive supervision
+- Train retrieval model with structural multi-positive supervision (`typename`, `Type->field`, `type ... { ... }`)
 - Evaluate on held-out worlds with realism/adversarial/compositional benchmarks
 - Track metrics and plots locally and optionally in W&B
 
@@ -38,12 +38,26 @@ set -a; source .env; set +a
 make ingest-schema
 make generate-openai-seed
 make build-dataset
+make backfill-structural-corpus
 make train-embedder
 make eval-retrieval
 make run-benchmark
 make plot-metrics
 make build-ann-index
 ```
+
+## Production one-command flow
+
+Use a single versioned run with hard checks (non-empty train/val/test):
+
+```bash
+make prod-run VERSION=11 CONFIG=examples/pipeline_config.prod.yaml TRAIN_SIZE=10000 EPOCHS=3
+```
+
+Outputs:
+- model: `artifacts/models/qwen3-v11-sdl`
+- eval: `artifacts/eval/v11`
+- index: `artifacts/index/v11`
 
 ## Main commands
 
@@ -92,16 +106,28 @@ Outputs:
 
 ### 3) Train embedder (epoch benchmark logging)
 
+If your corpus was generated before structural views existed, backfill first:
+
+```bash
+graphft backfill-structural-corpus \
+  --corpus artifacts/datasets/v1/corpus.jsonl \
+  --out artifacts/datasets/v1/corpus_structural.jsonl \
+  --worlds-dir artifacts/worlds/v1 \
+  --primary-retrieval-view sdl
+```
+
 ```bash
 graphft train-embedder \
   --train artifacts/datasets/v1/train.jsonl \
   --val artifacts/datasets/v1/val.jsonl \
-  --corpus artifacts/datasets/v1/corpus.jsonl \
+  --corpus artifacts/datasets/v1/corpus_structural.jsonl \
   --model Qwen/Qwen3-Embedding-0.6B \
   --epochs 3 \
   --batch-size 16 \
   --learning-rate 2e-5 \
   --disable-lora \
+  --positive-views typename,field_paths,sdl \
+  --primary-retrieval-view sdl \
   --tracking-backend wandb \
   --eval-every-epoch \
   --benchmark-dir artifacts/datasets/v1/benchmarks \
@@ -114,9 +140,10 @@ graphft train-embedder \
 ```bash
 graphft eval-retrieval \
   --eval-set artifacts/datasets/v1/test.jsonl \
-  --corpus artifacts/datasets/v1/corpus.jsonl \
+  --corpus artifacts/datasets/v1/corpus_structural.jsonl \
   --base-model Qwen/Qwen3-Embedding-0.6B \
   --tuned-model artifacts/models/qwen3-embedding-0.6b-ft \
+  --retrieval-view sdl \
   --out-dir artifacts/eval
 ```
 
@@ -125,8 +152,9 @@ graphft eval-retrieval \
 ```bash
 graphft run-benchmark \
   --benchmark-dir artifacts/datasets/v1/benchmarks \
-  --corpus artifacts/datasets/v1/corpus.jsonl \
+  --corpus artifacts/datasets/v1/corpus_structural.jsonl \
   --model artifacts/models/qwen3-embedding-0.6b-ft \
+  --retrieval-view sdl \
   --tracking-backend wandb \
   --out-dir artifacts/eval/benchmarks
 
@@ -141,8 +169,9 @@ graphft plot-metrics \
 
 ```bash
 graphft build-ann-index \
-  --corpus artifacts/datasets/v1/corpus.jsonl \
+  --corpus artifacts/datasets/v1/corpus_structural.jsonl \
   --model artifacts/models/qwen3-embedding-0.6b-ft \
+  --retrieval-view sdl \
   --out-dir artifacts/index
 ```
 
@@ -154,6 +183,14 @@ Each query row can include:
 - `relevant_type_ids` (2-5)
 - `relation_pair` (`primary`, `bridge`)
 - `difficulty`, `noise_tags`, `adversarial_tags`, `negative_type_ids`
+
+## Structural corpus views
+
+Each corpus row can include:
+- `type_name_text` (`TypeName`)
+- `field_paths_text` (`TypeName->field:type`)
+- `sdl_text` (`type TypeName { ... }`)
+- `retrieval_text` (selected primary retrieval view; default `sdl`)
 
 ## Metrics
 

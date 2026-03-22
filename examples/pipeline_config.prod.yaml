@@ -1,0 +1,18 @@
+openai:
+  model: gpt-4o-mini
+  temperature: 0.8
+  retries: 5
+  items_per_world: 200
+  request_batch_size: 20
+  max_concurrency: 2
+
+worlds:
+  world_count: 60
+  min_types: 20
+  max_types: 36
+
+dataset:
+  target_train_min: 10000
+  target_train_max: 10000
+  semantic_dedupe_threshold: 0.999
+  leakage_threshold: 0.15

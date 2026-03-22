@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from graphql_finetuning_pipeline.data.models import CorpusRecord
+from graphql_finetuning_pipeline.data.structural_views import render_field_paths_text, render_sdl_text, render_type_name_text
 from graphql_finetuning_pipeline.utils.io import ensure_dir, write_json, write_jsonl
 
 DOMAINS: dict[str, list[str]] = {
@@ -381,6 +382,10 @@ def generate_schema_worlds(out_dir: Path, cfg: WorldConfig) -> tuple[list[dict],
 
         for t, meta in catalog.items():
             type_id = f"{world_id}:{t}"
+            fields = [(f["name"], f.get("type", "String")) for f in meta.get("fields", [])]
+            type_name_text = render_type_name_text(t)
+            field_paths_text = render_field_paths_text(t, fields)
+            sdl_text = render_sdl_text(t, fields)
             corpus_rows.append(
                 CorpusRecord(
                     type_id=type_id,
@@ -388,6 +393,10 @@ def generate_schema_worlds(out_dir: Path, cfg: WorldConfig) -> tuple[list[dict],
                     short_text=f"{t} entity in {domain}",
                     full_text=_full_text(t, meta["neighbors"], meta["aliases"], meta.get("fields", []), domain),
                     keywords_text=" | ".join(sorted(set([t.lower(), domain] + [a.lower() for a in meta["aliases"]]))),
+                    type_name_text=type_name_text,
+                    field_paths_text=field_paths_text,
+                    sdl_text=sdl_text,
+                    retrieval_text=sdl_text,
                     metadata={
                         "world_id": world_id,
                         "domain": domain,

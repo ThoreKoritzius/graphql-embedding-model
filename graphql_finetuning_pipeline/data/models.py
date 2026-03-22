@@ -33,6 +33,10 @@ class CorpusRecord(BaseModel):
     short_text: str
     full_text: str
     keywords_text: str
+    type_name_text: str = ""
+    field_paths_text: str = ""
+    sdl_text: str = ""
+    retrieval_text: str = ""
     metadata: dict = Field(default_factory=dict)
 
 

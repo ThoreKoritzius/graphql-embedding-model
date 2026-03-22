@@ -1,5 +1,8 @@
+import pytest
+
 from graphql_finetuning_pipeline.data.dataset_builder import ambiguity_filter, leakage_filter, semantic_dedupe
-from graphql_finetuning_pipeline.data.models import QueryRecord
+from graphql_finetuning_pipeline.data.dataset_builder import DatasetBuildConfig, build_dataset
+from graphql_finetuning_pipeline.data.models import CorpusRecord, QueryRecord
 
 
 def _row(query_id: str, query: str, family: str = "f1") -> QueryRecord:
@@ -36,3 +39,44 @@ def test_ambiguity_filter_drops_vague_queries():
     out = ambiguity_filter(rows)
     assert len(out) == 1
     assert out[0].query_id == "2"
+
+
+def test_build_dataset_requires_non_empty_holdout_splits(tmp_path):
+    corpus = [
+        CorpusRecord(
+            type_id="User",
+            type_name="User",
+            short_text="User",
+            full_text="User",
+            keywords_text="user",
+            type_name_text="User",
+            field_paths_text="User->id:ID!",
+            sdl_text="type User {\n  id: ID!\n}",
+            retrieval_text="type User {\n  id: ID!\n}",
+            metadata={},
+        )
+    ]
+    rows = [
+        QueryRecord(
+            query_id="q1",
+            query="find user profile",
+            target_type_id="User",
+            split="train",
+            source="test",
+            family_id="f1",
+            quality_score=0.9,
+            world_id="world_0000",
+            world_split="train",
+            relevant_type_ids=["User"],
+        )
+    ]
+    cfg = DatasetBuildConfig(version=99, target_train_min=1, target_train_max=1)
+    with pytest.raises(ValueError, match="missing held-out splits"):
+        build_dataset(
+            openai_seed_rows=rows,
+            corpus=corpus,
+            out_dir=tmp_path,
+            schema_hash="abc",
+            cfg=cfg,
+            generation_config={"openai_model": "gpt-4o-mini"},
+        )

@@ -9,6 +9,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from tqdm import tqdm
 
 from graphql_finetuning_pipeline.data.models import CorpusRecord, QueryRecord
+from graphql_finetuning_pipeline.data.structural_views import corpus_structural_hash
 from graphql_finetuning_pipeline.utils.embeddings import light_embed
 from graphql_finetuning_pipeline.utils.io import ensure_dir, write_json, write_jsonl
 
@@ -138,16 +139,37 @@ def build_dataset(
 
     print("Building dataset: quality filtering")
     canonical_names = {c.type_name for c in corpus}
-    rows = [r for r in openai_seed_rows if r.quality_score >= cfg.min_quality_score]
-    rows = ambiguity_filter(rows)
-    rows = leakage_filter(rows, canonical_names=canonical_names, threshold=cfg.leakage_threshold)
-    rows = semantic_dedupe(rows, threshold=cfg.semantic_dedupe_threshold)
+    seed_by_split: dict[str, list[QueryRecord]] = {"train": [], "val": [], "test": []}
+    for r in openai_seed_rows:
+        split = (r.world_split or r.split or "train").lower()
+        if split not in seed_by_split:
+            split = "train"
+        if r.quality_score >= cfg.min_quality_score:
+            seed_by_split[split].append(r.model_copy(update={"split": split}))
 
-    # World split comes from generation; keep hard separation.
+    if not seed_by_split["val"] or not seed_by_split["test"]:
+        raise ValueError(
+            "OpenAI seed rows are missing held-out splits. "
+            "Expected non-empty val and test rows in `seed_pairs_v1.jsonl`. "
+            "Re-run `graphft generate-openai-seed` until completion."
+        )
+
     split_rows: list[QueryRecord] = []
-    for r in rows:
-        split = r.world_split or r.split or "train"
-        split_rows.append(r.model_copy(update={"split": split}))
+    pre_filter_counts = {k: len(v) for k, v in seed_by_split.items()}
+    post_filter_counts: dict[str, int] = {}
+
+    # Filter each split independently to avoid train rows deduping away val/test.
+    for split, rows in seed_by_split.items():
+        filtered = ambiguity_filter(rows)
+        filtered = leakage_filter(filtered, canonical_names=canonical_names, threshold=cfg.leakage_threshold)
+        deduped = semantic_dedupe(filtered, threshold=cfg.semantic_dedupe_threshold)
+
+        # Keep holdouts non-empty for reliable eval; if dedupe is too aggressive, keep pre-dedupe rows.
+        if split in {"val", "test"} and not deduped and filtered:
+            deduped = filtered
+
+        post_filter_counts[split] = len(deduped)
+        split_rows.extend([r.model_copy(update={"split": split}) for r in deduped])
 
     # Scale training set to desired size with augmentation while keeping val/test untouched.
     train_rows = [r for r in split_rows if r.split == "train"]
@@ -181,8 +203,12 @@ def build_dataset(
     manifest = {
         "version": cfg.version,
         "schema_hash": schema_hash,
+        "corpus_view_version": 1,
+        "corpus_structural_hash": corpus_structural_hash(corpus),
         "generation_config": generation_config,
         "counts": dict(Counter([r.split for r in split_rows])),
+        "seed_split_counts": pre_filter_counts,
+        "post_filter_split_counts": post_filter_counts,
         "world_split_counts": dict(world_splits),
         "domain_counts": dict(domain_counts),
         "seed_rows": len(openai_seed_rows),

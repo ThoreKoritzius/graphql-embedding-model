@@ -20,6 +20,7 @@ class EpochEvalCallback(TrainerCallback):
         benchmark_sets: dict[str, list[QueryRecord]],
         out_dir: Path,
         tracking_backend: str = "none",
+        retrieval_view: str = "sdl",
     ) -> None:
         self.model = model
         self.corpus_rows = corpus_rows
@@ -28,6 +29,7 @@ class EpochEvalCallback(TrainerCallback):
         ensure_dir(self.metrics_dir)
         self.metrics_path = self.metrics_dir / "epoch_metrics.jsonl"
         self.tracking_backend = tracking_backend
+        self.retrieval_view = retrieval_view
 
     def _log_wandb(self, payload: dict) -> None:
         if self.tracking_backend != "wandb":
@@ -43,7 +45,7 @@ class EpochEvalCallback(TrainerCallback):
         epoch = int(state.epoch or 0)
         records = []
         for name, rows in self.benchmark_sets.items():
-            result = evaluate_benchmark_set(rows, self.corpus_rows, self.model)
+            result = evaluate_benchmark_set(rows, self.corpus_rows, self.model, retrieval_view=self.retrieval_view)
             rec = {
                 "epoch": epoch,
                 "benchmark": name,

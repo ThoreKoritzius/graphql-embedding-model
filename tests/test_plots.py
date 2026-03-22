@@ -11,10 +11,16 @@ class _FakePLT:
     def plot(self, *args, **kwargs):
         return None
 
+    def grid(self, *args, **kwargs):
+        return None
+
     def xlabel(self, *args, **kwargs):
         return None
 
     def ylabel(self, *args, **kwargs):
+        return None
+
+    def ylim(self, *args, **kwargs):
         return None
 
     def title(self, *args, **kwargs):

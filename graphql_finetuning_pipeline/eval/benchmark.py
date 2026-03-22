@@ -10,6 +10,7 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 from graphql_finetuning_pipeline.data.models import CorpusRecord, QueryRecord
+from graphql_finetuning_pipeline.data.structural_views import ensure_view_available, get_view_text, normalize_primary_retrieval_view
 from graphql_finetuning_pipeline.eval.metrics import (
     aggregate,
     coverage_at_k,
@@ -56,6 +57,7 @@ def evaluate_benchmark_set(
     model_ref: Any,
     *,
     top_k: int = 10,
+    retrieval_view: str = "sdl",
 ) -> dict[str, Any]:
     if not rows:
         return {
@@ -75,8 +77,10 @@ def evaluate_benchmark_set(
             "per_query": [],
         }
 
+    view = normalize_primary_retrieval_view(retrieval_view)
+    ensure_view_available(corpus_rows, view)
     corpus_ids = [c.type_id for c in corpus_rows]
-    corpus_texts = [c.full_text for c in corpus_rows]
+    corpus_texts = [get_view_text(c, view) for c in corpus_rows]
 
     t0 = time.perf_counter()
     corpus_emb = _encode(model_ref, corpus_texts)
@@ -155,6 +159,7 @@ def run_benchmarks(
     corpus_rows: list[CorpusRecord],
     model_ref: str,
     out_dir: Path,
+    retrieval_view: str = "sdl",
 ) -> dict[str, Any]:
     ensure_dir(out_dir)
     results: dict[str, Any] = {}
@@ -162,7 +167,7 @@ def run_benchmarks(
     for f in sorted(benchmark_dir.glob("*.jsonl")):
         name = f.stem
         rows = [QueryRecord.model_validate(x) for x in read_jsonl(f)]
-        results[name] = evaluate_benchmark_set(rows, corpus_rows, model_ref)
+        results[name] = evaluate_benchmark_set(rows, corpus_rows, model_ref, retrieval_view=retrieval_view)
         (out_dir / f"{name}_summary.json").write_text(json.dumps(results[name], indent=2), encoding="utf-8")
 
     (out_dir / "benchmarks_summary.json").write_text(json.dumps(results, indent=2), encoding="utf-8")

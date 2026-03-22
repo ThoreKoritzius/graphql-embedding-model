@@ -8,15 +8,23 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 from graphql_finetuning_pipeline.data.models import CorpusRecord
+from graphql_finetuning_pipeline.data.structural_views import ensure_view_available, get_view_text, normalize_primary_retrieval_view
 from graphql_finetuning_pipeline.utils.embeddings import encode_with_resolution
 from graphql_finetuning_pipeline.utils.io import ensure_dir
 
 
-def build_index(corpus_rows: list[CorpusRecord], model_path_or_name: str, out_dir: Path) -> dict:
+def build_index(
+    corpus_rows: list[CorpusRecord],
+    model_path_or_name: str,
+    out_dir: Path,
+    retrieval_view: str = "sdl",
+) -> dict:
     ensure_dir(out_dir)
+    view = normalize_primary_retrieval_view(retrieval_view)
+    ensure_view_available(corpus_rows, view)
 
     ids = [c.type_id for c in corpus_rows]
-    texts = [c.full_text for c in corpus_rows]
+    texts = [get_view_text(c, view) for c in corpus_rows]
     emb = encode_with_resolution(model_path_or_name, texts, allow_remote_fallback=True)
 
     config = {
@@ -25,6 +33,7 @@ def build_index(corpus_rows: list[CorpusRecord], model_path_or_name: str, out_di
         "similarity": "cosine",
         "index_type": "sklearn-bruteforce",
         "truncation_length": 512,
+        "retrieval_view": view,
     }
 
     # Attempt FAISS first.

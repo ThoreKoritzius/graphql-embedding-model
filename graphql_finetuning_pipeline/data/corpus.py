@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from graphql_finetuning_pipeline.data.models import CorpusRecord, GraphQLTypeRecord
+from graphql_finetuning_pipeline.data.structural_views import structural_views_from_graphql_type
 
 
 def _desc(desc: str | None) -> str:
@@ -40,6 +41,7 @@ def render_keywords_text(t: GraphQLTypeRecord) -> str:
 def build_corpus(records: list[GraphQLTypeRecord]) -> list[CorpusRecord]:
     out: list[CorpusRecord] = []
     for t in records:
+        type_name_text, field_paths_text, sdl_text = structural_views_from_graphql_type(t)
         out.append(
             CorpusRecord(
                 type_id=t.type_id,
@@ -47,6 +49,10 @@ def build_corpus(records: list[GraphQLTypeRecord]) -> list[CorpusRecord]:
                 short_text=render_short_text(t),
                 full_text=render_full_text(t),
                 keywords_text=render_keywords_text(t),
+                type_name_text=type_name_text,
+                field_paths_text=field_paths_text,
+                sdl_text=sdl_text,
+                retrieval_text=sdl_text,
                 metadata={
                     "type_kind": t.type_kind,
                     "field_count": len(t.fields),

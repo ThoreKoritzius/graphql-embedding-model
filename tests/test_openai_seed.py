@@ -55,13 +55,13 @@ def test_mocked_openai_seed_and_dataset_build(tmp_path: Path):
         ]
     }
     mock_path = tmp_path / "mock_openai.jsonl"
-    mock_path.write_text("\n".join([json.dumps(mock_line), json.dumps(mock_line)]), encoding="utf-8")
+    mock_path.write_text(json.dumps(mock_line), encoding="utf-8")
 
     out_rows, _, corpus = generate_openai_seed(
         out_dir=tmp_path,
         cfg=OpenAISeedConfig(
             items_per_world=2,
-            world_count=2,
+            world_count=1,
             worlds_version=1,
             min_types_per_world=20,
             max_types_per_world=20,
@@ -69,9 +69,14 @@ def test_mocked_openai_seed_and_dataset_build(tmp_path: Path):
         mock_responses_path=mock_path,
     )
     assert len(out_rows) >= 2
+    synthetic_rows = []
+    for i, row in enumerate(out_rows[:2]):
+        synthetic_rows.append(row.model_copy(update={"split": "train", "world_split": "train", "query_id": f"train-{i}"}))
+        synthetic_rows.append(row.model_copy(update={"split": "val", "world_split": "val", "query_id": f"val-{i}"}))
+        synthetic_rows.append(row.model_copy(update={"split": "test", "world_split": "test", "query_id": f"test-{i}"}))
 
     manifest = build_dataset(
-        openai_seed_rows=out_rows,
+        openai_seed_rows=synthetic_rows,
         corpus=corpus,
         out_dir=tmp_path,
         schema_hash="abc123",

@@ -12,6 +12,11 @@ from sentence_transformers import SentenceTransformer, SentenceTransformerTraine
 from sentence_transformers.training_args import SentenceTransformerTrainingArguments
 
 from graphql_finetuning_pipeline.data.models import CorpusRecord, QueryRecord
+from graphql_finetuning_pipeline.data.structural_views import (
+    get_positive_texts,
+    normalize_primary_retrieval_view,
+    parse_positive_views,
+)
 from graphql_finetuning_pipeline.training.epoch_eval import EpochEvalCallback
 from graphql_finetuning_pipeline.utils.io import ensure_dir
 
@@ -27,6 +32,8 @@ class TrainConfig:
     tracking_backend: str = "none"
     experiment_name: str = "graphql-embedder-finetune"
     eval_every_epoch: bool = False
+    positive_views: list[str] | None = None
+    primary_retrieval_view: str = "sdl"
 
 
 def _maybe_attach_lora(model: SentenceTransformer, rank: int = 16) -> None:
@@ -49,23 +56,24 @@ def _maybe_attach_lora(model: SentenceTransformer, rank: int = 16) -> None:
         return
 
 
-def _build_pair_rows(rows: list[QueryRecord], type_to_doc: dict[str, str]) -> list[dict[str, str]]:
+def _build_pair_rows(rows: list[QueryRecord], type_to_docs: dict[str, list[str]]) -> list[dict[str, str]]:
     pairs: list[dict[str, str]] = []
     for row in rows:
         primary = row.primary_type_id or row.target_type_id
         positives = row.relevant_type_ids or [primary]
-        positives = [p for p in positives if p in type_to_doc]
-        if primary in type_to_doc and primary not in positives:
+        positives = [p for p in positives if p in type_to_docs]
+        if primary in type_to_docs and primary not in positives:
             positives.insert(0, primary)
         if not positives:
             continue
         for p in positives:
-            pairs.append({"anchor": row.query, "positive": type_to_doc[p]})
+            for doc in type_to_docs[p]:
+                pairs.append({"anchor": row.query, "positive": doc})
     return pairs
 
 
-def build_pair_dataset(rows: list[QueryRecord], type_to_doc: dict[str, str]) -> Dataset:
-    return Dataset.from_list(_build_pair_rows(rows, type_to_doc))
+def build_pair_dataset(rows: list[QueryRecord], type_to_docs: dict[str, list[str]]) -> Dataset:
+    return Dataset.from_list(_build_pair_rows(rows, type_to_docs))
 
 
 def compute_warmup_steps(train_size: int, batch_size: int, epochs: int, warmup_ratio: float = 0.05) -> int:
@@ -93,9 +101,23 @@ def train_biencoder(
     if cfg.use_lora:
         _maybe_attach_lora(model)
 
-    type_to_doc = {c.type_id: c.full_text for c in corpus_rows}
-    train_dataset = build_pair_dataset(train_rows, type_to_doc)
-    val_dataset = build_pair_dataset(val_rows, type_to_doc)
+    positive_views = parse_positive_views(",".join(cfg.positive_views) if cfg.positive_views else None)
+    primary_retrieval_view = normalize_primary_retrieval_view(cfg.primary_retrieval_view)
+
+    type_to_docs: dict[str, list[str]] = {}
+    for c in corpus_rows:
+        docs = get_positive_texts(c, positive_views)
+        if docs:
+            type_to_docs[c.type_id] = docs
+
+    if not type_to_docs:
+        raise ValueError(
+            "No structural corpus texts available for selected positive views. "
+            "Run `graphft backfill-structural-corpus` and use the produced corpus file."
+        )
+
+    train_dataset = build_pair_dataset(train_rows, type_to_docs)
+    val_dataset = build_pair_dataset(val_rows, type_to_docs)
 
     if len(train_dataset) == 0:
         raise ValueError(
@@ -141,6 +163,7 @@ def train_biencoder(
                 benchmark_sets=benchmark_sets,
                 out_dir=out_dir,
                 tracking_backend=cfg.tracking_backend,
+                retrieval_view=primary_retrieval_view,
             )
         )
 
@@ -183,6 +206,9 @@ def train_biencoder(
         "experiment_name": cfg.experiment_name,
         "corpus_hash": corpus_hash,
         "eval_every_epoch": cfg.eval_every_epoch,
+        "positive_views": positive_views,
+        "primary_retrieval_view": primary_retrieval_view,
+        "structural_corpus": True,
     }
     (out_dir / "training_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
@@ -199,6 +225,8 @@ def train_biencoder(
                     "max_seq_length": cfg.max_seq_length,
                     "use_lora": cfg.use_lora,
                     "corpus_hash": corpus_hash,
+                    "positive_views": positive_views,
+                    "primary_retrieval_view": primary_retrieval_view,
                 },
                 allow_val_change=True,
             )

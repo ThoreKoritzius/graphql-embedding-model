@@ -7,10 +7,12 @@ from pathlib import Path
 import yaml
 
 from graphql_finetuning_pipeline.data.corpus import build_corpus
+from graphql_finetuning_pipeline.data.corpus_backfill import backfill_structural_views, load_world_type_lookup
 from graphql_finetuning_pipeline.data.dataset_builder import DatasetBuildConfig, build_dataset
 from graphql_finetuning_pipeline.data.models import CorpusRecord, GraphQLTypeRecord, QueryRecord
 from graphql_finetuning_pipeline.data.openai_seed import OpenAISeedConfig, generate_openai_seed
 from graphql_finetuning_pipeline.data.schema_ingest import parse_schema
+from graphql_finetuning_pipeline.data.structural_views import corpus_structural_hash, parse_positive_views
 from graphql_finetuning_pipeline.data.synthetic import (
     bootstrap_queries,
     build_benchmark_sets,
@@ -87,6 +89,37 @@ def cmd_build_corpus(args: argparse.Namespace) -> None:
     write_jsonl(path, [r.model_dump() for r in corpus_rows])
 
     print(json.dumps({"corpus": str(path), "count": len(corpus_rows)}, indent=2))
+
+
+def cmd_backfill_structural_corpus(args: argparse.Namespace) -> None:
+    in_path = Path(args.corpus)
+    out_path = Path(args.out)
+    corpus_rows = _load_corpus(in_path)
+
+    world_lookup = None
+    if args.worlds_dir:
+        world_lookup = load_world_type_lookup(Path(args.worlds_dir))
+
+    out_rows = backfill_structural_views(
+        corpus_rows,
+        primary_retrieval_view=args.primary_retrieval_view,
+        world_type_lookup=world_lookup,
+    )
+    ensure_dir(out_path.parent)
+    write_jsonl(out_path, [r.model_dump() for r in out_rows])
+    print(
+        json.dumps(
+            {
+                "input_rows": len(corpus_rows),
+                "output_rows": len(out_rows),
+                "out_path": str(out_path),
+                "primary_retrieval_view": args.primary_retrieval_view,
+                "corpus_view_version": 1,
+                "corpus_structural_hash": corpus_structural_hash(out_rows),
+            },
+            indent=2,
+        )
+    )
 
 
 def cmd_generate_openai_seed(args: argparse.Namespace) -> None:
@@ -245,6 +278,8 @@ def cmd_train_embedder(args: argparse.Namespace) -> None:
         tracking_backend=args.tracking_backend,
         experiment_name=run_name,
         eval_every_epoch=args.eval_every_epoch,
+        positive_views=parse_positive_views(args.positive_views),
+        primary_retrieval_view=args.primary_retrieval_view,
     )
     manifest = train_biencoder(
         train_rows,
@@ -270,6 +305,12 @@ def cmd_eval_retrieval(args: argparse.Namespace) -> None:
     ensure_dir(out_dir)
 
     eval_rows = _load_eval_rows(Path(args.eval_set), args.split)
+    if not eval_rows:
+        raise ValueError(
+            f"No evaluation rows found in {args.eval_set}"
+            + (f" for split={args.split}" if args.split else "")
+            + ". Use a non-empty eval file (e.g., val split) or rebuild dataset with held-out test rows."
+        )
     corpus_rows = _load_corpus(Path(args.corpus))
 
     base_metrics = evaluate(
@@ -277,12 +318,14 @@ def cmd_eval_retrieval(args: argparse.Namespace) -> None:
         corpus_rows,
         model_path_or_name=args.base_model,
         out_path=out_dir / "baseline_metrics.json",
+        retrieval_view=args.retrieval_view,
     )
     tuned_metrics = evaluate(
         eval_rows,
         corpus_rows,
         model_path_or_name=args.tuned_model,
         out_path=out_dir / "tuned_metrics.json",
+        retrieval_view=args.retrieval_view,
     )
 
     delta = {
@@ -299,7 +342,13 @@ def cmd_eval_retrieval(args: argparse.Namespace) -> None:
 def cmd_run_benchmark(args: argparse.Namespace) -> None:
     corpus_rows = _load_corpus(Path(args.corpus))
     out_dir = Path(args.out_dir)
-    summary = run_benchmarks(Path(args.benchmark_dir), corpus_rows, args.model, out_dir)
+    summary = run_benchmarks(
+        Path(args.benchmark_dir),
+        corpus_rows,
+        args.model,
+        out_dir,
+        retrieval_view=args.retrieval_view,
+    )
 
     if args.tracking_backend == "wandb":
         try:
@@ -357,7 +406,7 @@ def cmd_plot_metrics(args: argparse.Namespace) -> None:
 
 def cmd_build_ann_index(args: argparse.Namespace) -> None:
     corpus_rows = _load_corpus(Path(args.corpus))
-    config = build_index(corpus_rows, args.model, Path(args.out_dir))
+    config = build_index(corpus_rows, args.model, Path(args.out_dir), retrieval_view=args.retrieval_view)
     print(json.dumps(config, indent=2))
 
 
@@ -375,6 +424,13 @@ def _parser() -> argparse.ArgumentParser:
     p_corpus.add_argument("--version", type=int, default=1)
     p_corpus.add_argument("--out-dir", required=True)
     p_corpus.set_defaults(func=cmd_build_corpus)
+
+    p_backfill = sub.add_parser("backfill-structural-corpus")
+    p_backfill.add_argument("--corpus", required=True)
+    p_backfill.add_argument("--out", required=True)
+    p_backfill.add_argument("--worlds-dir")
+    p_backfill.add_argument("--primary-retrieval-view", choices=["typename", "field_paths", "sdl"], default="sdl")
+    p_backfill.set_defaults(func=cmd_backfill_structural_corpus)
 
     p_seed = sub.add_parser("generate-openai-seed")
     p_seed.add_argument("--out-dir", required=True)
@@ -443,6 +499,8 @@ def _parser() -> argparse.ArgumentParser:
     p_train.add_argument("--run-name")
     p_train.add_argument("--eval-every-epoch", action="store_true")
     p_train.add_argument("--benchmark-dir")
+    p_train.add_argument("--positive-views", default="typename,field_paths,sdl")
+    p_train.add_argument("--primary-retrieval-view", choices=["typename", "field_paths", "sdl"], default="sdl")
     p_train.add_argument("--out-dir", required=True)
     p_train.set_defaults(func=cmd_train_embedder)
 
@@ -452,6 +510,7 @@ def _parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--corpus", required=True)
     p_eval.add_argument("--base-model", default="Qwen/Qwen3-Embedding-0.6B")
     p_eval.add_argument("--tuned-model", required=True)
+    p_eval.add_argument("--retrieval-view", choices=["typename", "field_paths", "sdl"], default="sdl")
     p_eval.add_argument("--out-dir", required=True)
     p_eval.set_defaults(func=cmd_eval_retrieval)
 
@@ -459,6 +518,7 @@ def _parser() -> argparse.ArgumentParser:
     p_bench.add_argument("--benchmark-dir", required=True)
     p_bench.add_argument("--corpus", required=True)
     p_bench.add_argument("--model", required=True)
+    p_bench.add_argument("--retrieval-view", choices=["typename", "field_paths", "sdl"], default="sdl")
     p_bench.add_argument("--tracking-backend", choices=["none", "wandb"], default="none")
     p_bench.add_argument("--out-dir", required=True)
     p_bench.set_defaults(func=cmd_run_benchmark)
@@ -473,6 +533,7 @@ def _parser() -> argparse.ArgumentParser:
     p_idx = sub.add_parser("build-ann-index")
     p_idx.add_argument("--corpus", required=True)
     p_idx.add_argument("--model", required=True)
+    p_idx.add_argument("--retrieval-view", choices=["typename", "field_paths", "sdl"], default="sdl")
     p_idx.add_argument("--out-dir", required=True)
     p_idx.set_defaults(func=cmd_build_ann_index)
 

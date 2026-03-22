@@ -22,7 +22,7 @@ def _build_rows():
 
 def test_build_pair_dataset_contract():
     corpus, train_rows = _build_rows()
-    type_to_doc = {c.type_id: c.full_text for c in corpus}
+    type_to_doc = {c.type_id: [c.sdl_text] for c in corpus}
     ds = build_pair_dataset(train_rows, type_to_doc)
     assert len(ds) > 0
     assert set(ds.column_names) == {"anchor", "positive"}

@@ -17,6 +17,7 @@ from graphql_finetuning_pipeline.eval.metrics import (
     recall_at_k,
     set_recall_at_k,
 )
+from graphql_finetuning_pipeline.data.structural_views import ensure_view_available, get_view_text, normalize_primary_retrieval_view
 from graphql_finetuning_pipeline.utils.embeddings import encode_with_resolution
 from graphql_finetuning_pipeline.utils.io import ensure_dir
 
@@ -26,9 +27,31 @@ def evaluate(
     corpus_rows: list[CorpusRecord],
     model_path_or_name: str,
     out_path: Path | None = None,
+    retrieval_view: str = "sdl",
 ) -> dict:
+    if not eval_rows:
+        metrics = {
+            "count": 0,
+            "recall@1": 0.0,
+            "recall@5": 0.0,
+            "recall@10": 0.0,
+            "mrr@10": 0.0,
+            "ndcg@10": 0.0,
+            "set_recall_any@5": 0.0,
+            "set_recall_all@10": 0.0,
+            "coverage@10": 0.0,
+            "pair_recall@10": 0.0,
+            "embedding_latency_seconds": {"corpus": 0.0, "queries": 0.0},
+        }
+        if out_path:
+            ensure_dir(out_path.parent)
+            out_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+        return metrics
+
+    view = normalize_primary_retrieval_view(retrieval_view)
+    ensure_view_available(corpus_rows, view)
     corpus_ids = [c.type_id for c in corpus_rows]
-    corpus_texts = [c.full_text for c in corpus_rows]
+    corpus_texts = [get_view_text(c, view) for c in corpus_rows]
 
     t0 = time.perf_counter()
     corpus_emb = encode_with_resolution(model_path_or_name, corpus_texts, allow_remote_fallback=True)
