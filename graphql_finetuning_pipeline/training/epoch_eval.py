@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from transformers import TrainerCallback
+try:
+    from transformers import TrainerCallback
+except Exception:
+    class TrainerCallback:
+        pass
 
 from graphql_finetuning_pipeline.data.models import CorpusRecord, QueryRecord
 from graphql_finetuning_pipeline.eval.benchmark import evaluate_benchmark_set
@@ -20,7 +24,7 @@ class EpochEvalCallback(TrainerCallback):
         benchmark_sets: dict[str, list[QueryRecord]],
         out_dir: Path,
         tracking_backend: str = "none",
-        retrieval_view: str = "sdl",
+        retrieval_view: str = "semantic",
     ) -> None:
         self.model = model
         self.corpus_rows = corpus_rows
@@ -54,10 +58,9 @@ class EpochEvalCallback(TrainerCallback):
                 "recall@10": result["recall@10"],
                 "mrr@10": result["mrr@10"],
                 "ndcg@10": result["ndcg@10"],
-                "set_recall_any@5": result.get("set_recall_any@5", 0.0),
-                "set_recall_all@10": result.get("set_recall_all@10", 0.0),
-                "coverage@10": result.get("coverage@10", 0.0),
-                "pair_recall@10": result.get("pair_recall@10", 0.0),
+                "exact_match@1": result.get("exact_match@1", 0.0),
+                "recall@3": result.get("recall@3", 0.0),
+                "same_owner_wrong_field_rate@1": result.get("same_owner_wrong_field_rate@1", 0.0),
             }
             records.append(rec)
             self._log_wandb({f"epoch/{name}/recall@5": rec["recall@5"], "epoch": epoch})
@@ -70,17 +73,18 @@ class EpochEvalCallback(TrainerCallback):
 
                     table_rows = result["per_query"][:150]
                     if table_rows:
-                        cols = ["query_id", "query", "target_type_id", "intent", "difficulty", "source", "top_k", "recall@5", "mrr@10", "ndcg@10"]
+                        cols = ["query_id", "query", "positive_coordinate", "intent", "difficulty", "source", "top_k", "exact_match@1", "recall@5", "mrr@10", "ndcg@10"]
                         table = wandb.Table(columns=cols)
                         for row in table_rows:
                             table.add_data(
                                 row.get("query_id"),
                                 row.get("query"),
-                                row.get("target_type_id"),
+                                row.get("positive_coordinate"),
                                 row.get("intent"),
                                 row.get("difficulty"),
                                 row.get("source"),
                                 ",".join(row.get("top_k", [])),
+                                row.get("exact_match@1"),
                                 row.get("recall@5"),
                                 row.get("mrr@10"),
                                 row.get("ndcg@10"),

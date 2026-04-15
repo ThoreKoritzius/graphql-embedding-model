@@ -329,6 +329,7 @@ def cmd_eval_retrieval(args: argparse.Namespace) -> None:
     )
 
     delta = {
+        "exact_match@1": tuned_metrics["exact_match@1"] - base_metrics["exact_match@1"],
         "recall@5": tuned_metrics["recall@5"] - base_metrics["recall@5"],
         "mrr@10": tuned_metrics["mrr@10"] - base_metrics["mrr@10"],
         "ndcg@10": tuned_metrics["ndcg@10"] - base_metrics["ndcg@10"],
@@ -354,24 +355,24 @@ def cmd_run_benchmark(args: argparse.Namespace) -> None:
         try:
             import wandb
 
-            table = wandb.Table(columns=["benchmark", "recall@5", "mrr@10", "ndcg@10", "set_recall_any@5", "pair_recall@10", "count"])
+            table = wandb.Table(columns=["benchmark", "exact_match@1", "recall@5", "mrr@10", "ndcg@10", "same_owner_wrong_field_rate@1", "count"])
             for name, vals in summary.items():
                 table.add_data(
                     name,
+                    vals.get("exact_match@1", 0.0),
                     vals["recall@5"],
                     vals["mrr@10"],
                     vals["ndcg@10"],
-                    vals.get("set_recall_any@5", 0.0),
-                    vals.get("pair_recall@10", 0.0),
+                    vals.get("same_owner_wrong_field_rate@1", 0.0),
                     vals["count"],
                 )
                 wandb.log(
                     {
+                        f"benchmark/{name}/exact_match@1": vals.get("exact_match@1", 0.0),
                         f"benchmark/{name}/recall@5": vals["recall@5"],
                         f"benchmark/{name}/mrr@10": vals["mrr@10"],
                         f"benchmark/{name}/ndcg@10": vals["ndcg@10"],
-                        f"benchmark/{name}/set_recall_any@5": vals.get("set_recall_any@5", 0.0),
-                        f"benchmark/{name}/pair_recall@10": vals.get("pair_recall@10", 0.0),
+                        f"benchmark/{name}/same_owner_wrong_field_rate@1": vals.get("same_owner_wrong_field_rate@1", 0.0),
                     }
                 )
             wandb.log({"benchmark/summary_table": table})
@@ -429,7 +430,7 @@ def _parser() -> argparse.ArgumentParser:
     p_backfill.add_argument("--corpus", required=True)
     p_backfill.add_argument("--out", required=True)
     p_backfill.add_argument("--worlds-dir")
-    p_backfill.add_argument("--primary-retrieval-view", choices=["typename", "field_paths", "sdl"], default="sdl")
+    p_backfill.add_argument("--primary-retrieval-view", choices=["coordinate", "signature", "semantic", "sdl"], default="semantic")
     p_backfill.set_defaults(func=cmd_backfill_structural_corpus)
 
     p_seed = sub.add_parser("generate-openai-seed")
@@ -499,8 +500,8 @@ def _parser() -> argparse.ArgumentParser:
     p_train.add_argument("--run-name")
     p_train.add_argument("--eval-every-epoch", action="store_true")
     p_train.add_argument("--benchmark-dir")
-    p_train.add_argument("--positive-views", default="typename,field_paths,sdl")
-    p_train.add_argument("--primary-retrieval-view", choices=["typename", "field_paths", "sdl"], default="sdl")
+    p_train.add_argument("--positive-views", default="coordinate,signature,semantic,sdl")
+    p_train.add_argument("--primary-retrieval-view", choices=["coordinate", "signature", "semantic", "sdl"], default="semantic")
     p_train.add_argument("--out-dir", required=True)
     p_train.set_defaults(func=cmd_train_embedder)
 
@@ -510,7 +511,7 @@ def _parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--corpus", required=True)
     p_eval.add_argument("--base-model", default="Qwen/Qwen3-Embedding-0.6B")
     p_eval.add_argument("--tuned-model", required=True)
-    p_eval.add_argument("--retrieval-view", choices=["typename", "field_paths", "sdl"], default="sdl")
+    p_eval.add_argument("--retrieval-view", choices=["coordinate", "signature", "semantic", "sdl"], default="semantic")
     p_eval.add_argument("--out-dir", required=True)
     p_eval.set_defaults(func=cmd_eval_retrieval)
 
@@ -518,7 +519,7 @@ def _parser() -> argparse.ArgumentParser:
     p_bench.add_argument("--benchmark-dir", required=True)
     p_bench.add_argument("--corpus", required=True)
     p_bench.add_argument("--model", required=True)
-    p_bench.add_argument("--retrieval-view", choices=["typename", "field_paths", "sdl"], default="sdl")
+    p_bench.add_argument("--retrieval-view", choices=["coordinate", "signature", "semantic", "sdl"], default="semantic")
     p_bench.add_argument("--tracking-backend", choices=["none", "wandb"], default="none")
     p_bench.add_argument("--out-dir", required=True)
     p_bench.set_defaults(func=cmd_run_benchmark)
@@ -533,7 +534,7 @@ def _parser() -> argparse.ArgumentParser:
     p_idx = sub.add_parser("build-ann-index")
     p_idx.add_argument("--corpus", required=True)
     p_idx.add_argument("--model", required=True)
-    p_idx.add_argument("--retrieval-view", choices=["typename", "field_paths", "sdl"], default="sdl")
+    p_idx.add_argument("--retrieval-view", choices=["coordinate", "signature", "semantic", "sdl"], default="semantic")
     p_idx.add_argument("--out-dir", required=True)
     p_idx.set_defaults(func=cmd_build_ann_index)
 

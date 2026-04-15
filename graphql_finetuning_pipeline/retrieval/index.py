@@ -23,7 +23,7 @@ def build_index(
     view = normalize_primary_retrieval_view(retrieval_view)
     ensure_view_available(corpus_rows, view)
 
-    ids = [c.type_id for c in corpus_rows]
+    ids = [c.coordinate for c in corpus_rows]
     texts = [get_view_text(c, view) for c in corpus_rows]
     emb = encode_with_resolution(model_path_or_name, texts, allow_remote_fallback=True)
 

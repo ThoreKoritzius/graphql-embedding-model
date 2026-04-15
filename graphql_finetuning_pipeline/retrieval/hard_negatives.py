@@ -7,7 +7,6 @@ from graphql_finetuning_pipeline.data.models import CorpusRecord, QueryRecord
 
 
 def _light_embed(texts: list[str]) -> np.ndarray:
-    # Cheap deterministic fallback embedding.
     dims = 512
     arr = np.zeros((len(texts), dims), dtype=np.float32)
     for i, t in enumerate(texts):
@@ -17,16 +16,11 @@ def _light_embed(texts: list[str]) -> np.ndarray:
     return arr / norms
 
 
-def mine_hard_negatives(
-    corpus: list[CorpusRecord],
-    queries: list[QueryRecord],
-    hard_k: int = 5,
-    easy_k: int = 5,
-    medium_k: int = 5,
-) -> list[QueryRecord]:
-    corpus_ids = [c.type_id for c in corpus]
+def mine_hard_negatives(corpus: list[CorpusRecord], queries: list[QueryRecord], hard_k: int = 5, easy_k: int = 5, medium_k: int = 5) -> list[QueryRecord]:
+    corpus_ids = [c.coordinate for c in corpus]
     corpus_texts = [c.full_text for c in corpus]
     corpus_emb = _light_embed(corpus_texts)
+    by_coord = {c.coordinate: c for c in corpus}
 
     out: list[QueryRecord] = []
     for q in queries:
@@ -35,34 +29,22 @@ def mine_hard_negatives(
         ranked_idx = np.argsort(-sims)
 
         hard: list[str] = []
+        medium: list[str] = []
+        easy: list[str] = []
+        target = by_coord.get(q.positive_coordinate)
         for idx in ranked_idx:
             cid = corpus_ids[idx]
-            if cid == q.target_type_id:
+            if cid == q.positive_coordinate:
                 continue
-            hard.append(cid)
-            if len(hard) >= hard_k:
-                break
-
-        easy_pool = [cid for cid in corpus_ids if cid != q.target_type_id and cid not in hard]
-        easy = easy_pool[:easy_k]
-
-        medium = []
-        target_prefix = q.target_type_id[:3].lower()
-        for cid in corpus_ids:
-            if cid == q.target_type_id or cid in hard:
-                continue
-            if cid[:3].lower() == target_prefix:
+            cand = by_coord[cid]
+            if target and cand.owner_type == target.owner_type and len(hard) < hard_k:
+                hard.append(cid)
+            elif target and cand.field_name == target.field_name and len(medium) < medium_k:
                 medium.append(cid)
-            if len(medium) >= medium_k:
+            elif len(easy) < easy_k:
+                easy.append(cid)
+            if len(hard) >= hard_k and len(medium) >= medium_k and len(easy) >= easy_k:
                 break
 
-        out.append(
-            q.model_copy(
-                update={
-                    "negatives_easy": easy,
-                    "negatives_medium": medium,
-                    "negatives_hard": hard,
-                }
-            )
-        )
+        out.append(q.model_copy(update={"negatives_easy": easy, "negatives_medium": medium, "negatives_hard": hard, "negative_coordinates": list(dict.fromkeys(hard + medium + easy))[: hard_k + medium_k + easy_k]}))
     return out

@@ -9,3 +9,4 @@ def test_corpus_renderer_is_deterministic():
     c1 = build_corpus(rows)
     c2 = build_corpus(rows)
     assert [x.full_text for x in c1] == [x.full_text for x in c2]
+    assert all("." in x.coordinate for x in c1)

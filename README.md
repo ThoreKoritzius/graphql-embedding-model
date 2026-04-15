@@ -1,14 +1,97 @@
-# GraphQL Finetuning Pipeline
+# GraphQL Semantic Introspection Field Retrieval
 
-Synthetic-schema-first pipeline for training an embedding model to retrieve relevant GraphQL types for user questions where users do **not** know schema/type names.
+Field-coordinate-first pipeline for training an embedding model to map natural-language capability requests to GraphQL schema coordinates such as `Post.author` or `Query.userByEmail`.
 
-## Core approach
+## Goal
 
-- Generate many synthetic schema worlds (domains like hotels/shopping/cars/fintech/etc.)
-- Generate schema-oblivious user questions with multi-relevant type labels
-- Train retrieval model with structural multi-positive supervision (`typename`, `Type->field`, `type ... { ... }`)
-- Evaluate on held-out worlds with realism/adversarial/compositional benchmarks
-- Track metrics and plots locally and optionally in W&B
+This project trains the retrieval component for semantic introspection `__search`.
+
+The embedder does one job:
+- rank the most relevant `Owner.field` coordinate for a natural-language query
+
+It does not do these jobs:
+- compute `pathsToRoot`
+- build the final GraphQL operation
+- plan multi-step query execution
+
+Those belong downstream in the MCP / semantic-introspection server.
+
+## Why Field Retrieval
+
+Type retrieval is too coarse for the actual product problem.
+
+If the user asks:
+- `Who wrote the post?`
+
+The target is:
+- `Post.author`
+
+A confuser like:
+- `User.name`
+
+is semantically close but still wrong. The retrieval system therefore needs exact coordinate recall, not just “some related type”.
+
+## Core Approach
+
+- Build field-level corpora from GraphQL schemas and synthetic schema worlds
+- Represent each document as a schema coordinate plus multiple retrieval views:
+  - `coordinate`
+  - `signature`
+  - `semantic`
+  - `sdl`
+- Generate training data as `anchor -> positive_coordinate -> hard negatives`
+- Prefer hard confusers over trivial augmentation
+- Split by schema world so held-out evaluation measures transfer to unseen schemas
+- Gate results on a curated challenge eval designed for realistic ambiguity
+
+## Dataset Philosophy
+
+A good dataset here has these properties:
+- schema-name blindness: user phrasing should not include canonical schema names
+- exact targets: one best coordinate, not just a rough type neighborhood
+- explicit confusers: same owner / wrong field, same field name / wrong owner, same return type / wrong semantics
+- held-out schemas: validation and test should use unseen worlds
+- curated final eval: release decisions should not rely only on synthetic holdouts
+
+## Data Format
+
+Training rows are field-first:
+
+```json
+{
+  "query": "Who wrote the post?",
+  "positive_coordinate": "Post.author",
+  "negative_coordinates": ["User.name", "Post.authorId"],
+  "owner_type": "Post",
+  "field_name": "author",
+  "intent": "authorship",
+  "confuser_tags": ["same_owner", "semantic"]
+}
+```
+
+Corpus rows store field-level views:
+- `coordinate_text`
+- `field_signature_text`
+- `field_semantic_text`
+- `sdl_snippet_text`
+- `retrieval_text`
+
+## Metrics
+
+Primary metrics:
+- `exact_match@1`
+- `recall@1/3/5/10`
+- `mrr@10`
+- `ndcg@10`
+- `same_owner_wrong_field_rate@1`
+
+Benchmark sets:
+- `realism_eval`
+- `adversarial_eval`
+- `synthetic_holdout`
+- `curated_challenge_eval`
+
+`curated_challenge_eval` is the release gate.
 
 ## Install
 
@@ -25,191 +108,49 @@ OPENAI_API_KEY=...
 WANDB_API_KEY=...
 ```
 
-Load vars:
-
-```bash
-source .venv/bin/activate
-set -a; source .env; set +a
-```
-
-## Quick workflow
-
-```bash
-make ingest-schema
-make generate-openai-seed
-make build-dataset
-make backfill-structural-corpus
-make train-embedder
-make eval-retrieval
-make run-benchmark
-make plot-metrics
-make build-ann-index
-```
-
-## Production one-command flow
-
-Use a single versioned run with hard checks (non-empty train/val/test):
-
-```bash
-make prod-run VERSION=11 CONFIG=examples/pipeline_config.prod.yaml TRAIN_SIZE=10000 EPOCHS=3
-```
-
-Outputs:
-- model: `artifacts/models/qwen3-v11-sdl`
-- eval: `artifacts/eval/v11`
-- index: `artifacts/index/v11`
-
-## Main commands
-
-### 1) Generate synthetic schema worlds + seed queries
+## Main Workflow
 
 ```bash
 graphft generate-openai-seed \
   --out-dir artifacts \
   --version 1 \
-  --config examples/pipeline_config.yaml \
-  --request-batch-size 20 \
-  --max-concurrency 4
-```
+  --config examples/pipeline_config.yaml
 
-Outputs:
-- `artifacts/worlds/v1/world_<id>/schema.graphql`
-- `artifacts/worlds/v1/world_<id>/type_catalog.json`
-- `artifacts/worlds/v1/manifest.json`
-- `artifacts/corpus/types_worlds_v1.jsonl`
-- `artifacts/openai/seed_pairs_v1.jsonl`
- - live checkpoints during generation:
-   - `artifacts/openai/seed_pairs_v1.partial.jsonl`
-   - `artifacts/openai/raw_seed_responses.partial.jsonl`
-
-Notes:
-- `--request-batch-size` controls examples requested per API call.
-- `--max-concurrency` controls parallel API calls per world.
-
-### 2) Build train/val/test dataset from world-seeded queries
-
-```bash
 graphft build-dataset \
   --corpus artifacts/corpus/types_worlds_v1.jsonl \
   --openai-seed artifacts/openai/seed_pairs_v1.jsonl \
-  --schema-hash-file artifacts/metadata/schema_hash.json \
   --out-dir artifacts \
-  --version 1 \
-  --config examples/pipeline_config.yaml
-```
+  --version 1
 
-Outputs:
-- `artifacts/datasets/v1/{train,val,test}.jsonl`
-- `artifacts/datasets/v1/corpus.jsonl`
-- `artifacts/datasets/v1/benchmarks/{realism_eval,adversarial_eval,compositional_eval}.jsonl`
-- `artifacts/datasets/v1/manifest.json`
-
-### 3) Train embedder (epoch benchmark logging)
-
-If your corpus was generated before structural views existed, backfill first:
-
-```bash
-graphft backfill-structural-corpus \
-  --corpus artifacts/datasets/v1/corpus.jsonl \
-  --out artifacts/datasets/v1/corpus_structural.jsonl \
-  --worlds-dir artifacts/worlds/v1 \
-  --primary-retrieval-view sdl
-```
-
-```bash
 graphft train-embedder \
   --train artifacts/datasets/v1/train.jsonl \
   --val artifacts/datasets/v1/val.jsonl \
-  --corpus artifacts/datasets/v1/corpus_structural.jsonl \
-  --model Qwen/Qwen3-Embedding-0.6B \
-  --epochs 3 \
-  --batch-size 16 \
-  --learning-rate 2e-5 \
-  --disable-lora \
-  --positive-views typename,field_paths,sdl \
-  --primary-retrieval-view sdl \
-  --tracking-backend wandb \
-  --eval-every-epoch \
-  --benchmark-dir artifacts/datasets/v1/benchmarks \
-  --run-name qwen3-embedder-v1 \
-  --out-dir artifacts/models/qwen3-embedding-0.6b-ft
-```
+  --corpus artifacts/datasets/v1/corpus.jsonl \
+  --positive-views coordinate,signature,semantic,sdl \
+  --primary-retrieval-view semantic \
+  --out-dir artifacts/models/qwen3-field-embedding-ft
 
-### 4) Baseline vs tuned test-set evaluation
-
-```bash
 graphft eval-retrieval \
   --eval-set artifacts/datasets/v1/test.jsonl \
-  --corpus artifacts/datasets/v1/corpus_structural.jsonl \
+  --corpus artifacts/datasets/v1/corpus.jsonl \
   --base-model Qwen/Qwen3-Embedding-0.6B \
-  --tuned-model artifacts/models/qwen3-embedding-0.6b-ft \
-  --retrieval-view sdl \
-  --out-dir artifacts/eval
-```
+  --tuned-model artifacts/models/qwen3-field-embedding-ft \
+  --retrieval-view semantic \
+  --out-dir artifacts/eval/v1
 
-### 5) Benchmarks + plots
-
-```bash
 graphft run-benchmark \
   --benchmark-dir artifacts/datasets/v1/benchmarks \
-  --corpus artifacts/datasets/v1/corpus_structural.jsonl \
-  --model artifacts/models/qwen3-embedding-0.6b-ft \
-  --retrieval-view sdl \
-  --tracking-backend wandb \
-  --out-dir artifacts/eval/benchmarks
-
-graphft plot-metrics \
-  --epoch-metrics artifacts/models/qwen3-embedding-0.6b-ft/metrics/epoch_metrics.jsonl \
-  --benchmark-summary artifacts/eval/benchmarks/benchmarks_summary.json \
-  --tracking-backend wandb \
-  --out-dir artifacts/eval/plots
+  --corpus artifacts/datasets/v1/corpus.jsonl \
+  --model artifacts/models/qwen3-field-embedding-ft \
+  --retrieval-view semantic \
+  --out-dir artifacts/eval/benchmarks_v1
 ```
 
-### 6) Build ANN index
+## Architecture Boundary
 
-```bash
-graphft build-ann-index \
-  --corpus artifacts/datasets/v1/corpus_structural.jsonl \
-  --model artifacts/models/qwen3-embedding-0.6b-ft \
-  --retrieval-view sdl \
-  --out-dir artifacts/index
-```
+The intended downstream flow is:
+1. Retriever ranks schema coordinates.
+2. Graph/path logic computes `pathsToRoot` for the selected coordinate.
+3. Query planner constructs the executable GraphQL operation.
 
-## Label format in dataset rows
-
-Each query row can include:
-- `world_id`, `domain`, `query`
-- `primary_type_id`
-- `relevant_type_ids` (2-5)
-- `relation_pair` (`primary`, `bridge`)
-- `difficulty`, `noise_tags`, `adversarial_tags`, `negative_type_ids`
-
-## Structural corpus views
-
-Each corpus row can include:
-- `type_name_text` (`TypeName`)
-- `field_paths_text` (`TypeName->field:type`)
-- `sdl_text` (`type TypeName { ... }`)
-- `retrieval_text` (selected primary retrieval view; default `sdl`)
-
-## Metrics
-
-- Core: `recall@1/5/10`, `mrr@10`, `ndcg@10`
-- Set/pair: `set_recall_any@5`, `set_recall_all@10`, `coverage@10`, `pair_recall@10`
-- Transfer: `seen_vs_unseen_recall@5_gap`
-
-## Offline generation/testing
-
-Use mocked OpenAI responses:
-
-```bash
-graphft generate-openai-seed --out-dir artifacts --version 1 --mock-responses-path /path/mock.jsonl
-```
-
-## Notes
-
-- `eval-retrieval` and `build-ann-index` fail fast for invalid local model paths.
-- If plotting fails due cache permissions in restricted envs, try:
-  ```bash
-  MPLCONFIGDIR=/tmp XDG_CACHE_HOME=/tmp graphft plot-metrics ...
-  ```
+This repo only covers step 1.

@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from graphql_finetuning_pipeline.data.models import CorpusRecord
-from graphql_finetuning_pipeline.data.structural_views import render_field_paths_text, render_sdl_text, render_type_name_text
 from graphql_finetuning_pipeline.utils.io import ensure_dir, write_json, write_jsonl
 
 DOMAINS: dict[str, list[str]] = {
@@ -260,6 +259,22 @@ class WorldConfig:
     seed: int = 42
 
 
+def _field_description(type_name: str, field_name: str, return_type: str) -> str:
+    semantics = {
+        "author": "Author or owner responsible for this record.",
+        "status": "Current lifecycle state.",
+        "createdAt": "Timestamp when the record was created.",
+        "updatedAt": "Timestamp when the record last changed.",
+        "email": "Email address used for communication or lookup.",
+        "phone": "Phone number used for communication.",
+        "displayName": "Human-readable name shown in UI.",
+        "name": "Human-readable canonical name.",
+        "currency": "ISO currency code.",
+    }
+    default = f"{field_name} on {type_name} returning {return_type}."
+    return semantics.get(field_name, default)
+
+
 def _sdl_for_world(type_catalog: dict[str, dict]) -> str:
     lines = [
         '"Synthetic world query root"',
@@ -292,20 +307,13 @@ def _sdl_for_world(type_catalog: dict[str, dict]) -> str:
     return "\n".join(lines)
 
 
-def _full_text(type_name: str, neighbors: list[str], aliases: list[str], fields: list[dict[str, str]], domain: str) -> str:
-    field_names = ", ".join([f["name"] for f in fields[:8]]) if fields else "id"
-    return (
-        f"GraphQL entity {type_name} in domain {domain}. "
-        f"User-facing aliases: {', '.join(aliases) or 'none'}. "
-        f"Related types: {', '.join(neighbors) or 'none'}. "
-        f"Representative fields: {field_names}. "
-        "Includes relation edges to neighboring entities."
-    )
+def _path_to_root(type_name: str, field_name: str) -> list[str]:
+    return [f"{type_name}.{field_name}", f"Query.{type_name[0].lower() + type_name[1:]}"]
 
 
 def _type_fields(type_name: str, domain: str) -> list[dict[str, str]]:
     lower = type_name.lower()
-    base = [{"name": "createdAt", "type": "String"}, {"name": "updatedAt", "type": "String"}]
+    base = [{"name": "id", "type": "ID!"}, {"name": "createdAt", "type": "String"}, {"name": "updatedAt", "type": "String"}]
     if any(x in lower for x in ["hotel", "property", "facility"]):
         base += [{"name": "name", "type": "String!"}, {"name": "city", "type": "String"}, {"name": "rating", "type": "Float"}]
     elif any(x in lower for x in ["room", "seat", "ticket"]):
@@ -318,7 +326,11 @@ def _type_fields(type_name: str, domain: str) -> list[dict[str, str]]:
         base += [{"name": "amountCents", "type": "Int!"}, {"name": "currency", "type": "String!"}, {"name": "state", "type": "String"}]
     else:
         base += [{"name": "name", "type": "String"}, {"name": "status", "type": "String"}, {"name": "description", "type": "String"}]
-    return base[:6]
+    if any(x in lower for x in ["post", "article", "ticket", "booking", "order", "claim", "report", "review"]):
+        base += [{"name": "author", "type": "User"}, {"name": "authorId", "type": "ID"}]
+    if any(x in lower for x in ["customer", "guest", "patient", "owner", "agent", "provider", "passenger", "user"]):
+        base += [{"name": "name", "type": "String"}, {"name": "profile", "type": "String"}]
+    return base[:8]
 
 
 def _type_catalog(domain: str, types: list[str], rng: random.Random, cfg: WorldConfig) -> dict[str, dict]:
@@ -336,6 +348,7 @@ def _type_catalog(domain: str, types: list[str], rng: random.Random, cfg: WorldC
             "semantic_tags": [domain, "entity"],
             "neighbors": neighbors,
             "fields": fields,
+            "description": f"{t} entity in the {domain} domain.",
         }
     return catalog
 
@@ -380,32 +393,69 @@ def generate_schema_worlds(out_dir: Path, cfg: WorldConfig) -> tuple[list[dict],
         sdl = _sdl_for_world(catalog)
         (world_dir / "schema.graphql").write_text(sdl, encoding="utf-8")
 
+        field_catalog: list[dict] = []
         for t, meta in catalog.items():
-            type_id = f"{world_id}:{t}"
-            fields = [(f["name"], f.get("type", "String")) for f in meta.get("fields", [])]
-            type_name_text = render_type_name_text(t)
-            field_paths_text = render_field_paths_text(t, fields)
-            sdl_text = render_sdl_text(t, fields)
-            corpus_rows.append(
-                CorpusRecord(
-                    type_id=type_id,
-                    type_name=t,
-                    short_text=f"{t} entity in {domain}",
-                    full_text=_full_text(t, meta["neighbors"], meta["aliases"], meta.get("fields", []), domain),
-                    keywords_text=" | ".join(sorted(set([t.lower(), domain] + [a.lower() for a in meta["aliases"]]))),
-                    type_name_text=type_name_text,
-                    field_paths_text=field_paths_text,
-                    sdl_text=sdl_text,
-                    retrieval_text=sdl_text,
-                    metadata={
-                        "world_id": world_id,
-                        "domain": domain,
-                        "neighbors": [f"{world_id}:{n}" for n in meta["neighbors"]],
-                        "aliases": meta["aliases"],
-                        "fields": [f["name"] for f in meta.get("fields", [])],
-                    },
+            for field in meta.get("fields", []):
+                coordinate = f"{t}.{field['name']}"
+                doc_id = f"{world_id}:{coordinate}"
+                field_record = {
+                    "owner_type": t,
+                    "field_name": field["name"],
+                    "return_type": field.get("type", "String"),
+                    "description": _field_description(t, field["name"], field.get("type", "String")),
+                    "aliases": sorted(set(meta["aliases"] + [field["name"].replace("_", " "), field["name"].lower()])),
+                    "path_to_root": _path_to_root(t, field["name"]),
+                }
+                field_catalog.append({"doc_id": doc_id, "coordinate": coordinate, **field_record})
+                sdl_text = f"type {t} {{\n  {field['name']}: {field.get('type', 'String')}\n}}"
+                corpus_rows.append(
+                    CorpusRecord(
+                        doc_id=doc_id,
+                        coordinate=coordinate,
+                        owner_type=t,
+                        field_name=field["name"],
+                        return_type=field.get("type", "String"),
+                        short_text=f"Field {coordinate} in {domain}",
+                        full_text=(
+                            f"GraphQL field {coordinate} in domain {domain}. "
+                            f"Owner aliases: {', '.join(meta['aliases']) or 'none'}. "
+                            f"Related types: {', '.join(meta['neighbors']) or 'none'}. "
+                            f"Field description: {_field_description(t, field['name'], field.get('type', 'String'))}"
+                        ),
+                        keywords_text=" | ".join(
+                            sorted(
+                                set(
+                                    [coordinate.lower(), t.lower(), field["name"].lower(), domain]
+                                    + [a.lower() for a in meta["aliases"]]
+                                )
+                            )
+                        ),
+                        description=_field_description(t, field["name"], field.get("type", "String")),
+                        aliases=field_record["aliases"],
+                        path_to_root=field_record["path_to_root"],
+                        coordinate_text=coordinate,
+                        field_signature_text=f"{coordinate}: {field.get('type', 'String')}",
+                        field_semantic_text=(
+                            f"GraphQL field {coordinate}. Owner type: {t}. Returns: {field.get('type', 'String')}. "
+                            f"Description: {_field_description(t, field['name'], field.get('type', 'String'))}. "
+                            f"Domain: {domain}. Related types: {', '.join(meta['neighbors']) or 'none'}."
+                        ),
+                        sdl_snippet_text=sdl_text,
+                        retrieval_text=(
+                            f"GraphQL field {coordinate}. Owner type: {t}. Returns: {field.get('type', 'String')}. "
+                            f"Description: {_field_description(t, field['name'], field.get('type', 'String'))}. "
+                            f"Domain: {domain}. Related types: {', '.join(meta['neighbors']) or 'none'}."
+                        ),
+                        metadata={
+                            "world_id": world_id,
+                            "domain": domain,
+                            "neighbors": [f"{world_id}:{n}" for n in meta["neighbors"]],
+                            "owner_aliases": meta["aliases"],
+                        },
+                    )
                 )
-            )
+
+        write_json(world_dir / "field_catalog.json", {"world_id": world_id, "domain": domain, "fields": field_catalog})
 
         world_rows.append(
             {
