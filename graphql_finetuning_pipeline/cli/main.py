@@ -286,6 +286,8 @@ def cmd_train_embedder(args: argparse.Namespace) -> None:
         mnrl_mini_batch_size=args.mnrl_mini_batch_size,
         precision=args.precision,
         seed=args.seed,
+        best_metric=args.best_metric,
+        best_benchmark=args.best_benchmark,
     )
     manifest = train_biencoder(
         train_rows,
@@ -417,6 +419,20 @@ def cmd_build_ann_index(args: argparse.Namespace) -> None:
     print(json.dumps(config, indent=2))
 
 
+def cmd_export_ollama(args: argparse.Namespace) -> None:
+    from graphql_finetuning_pipeline.deploy.ollama_export import export_to_ollama
+
+    quantizations = [q.strip() for q in args.quantize.split(",") if q.strip()] if args.quantize else None
+    summary = export_to_ollama(
+        Path(args.model_dir),
+        Path(args.out_dir),
+        tag=args.tag,
+        quantizations=quantizations,
+        llama_cpp_dir=args.llama_cpp_dir,
+    )
+    print(json.dumps(summary, indent=2))
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="graphft", description="GraphQL finetuning pipeline")
     sub = p.add_subparsers(dest="command", required=True)
@@ -514,6 +530,16 @@ def _parser() -> argparse.ArgumentParser:
     p_train.add_argument("--mnrl-mini-batch-size", type=int, default=16)
     p_train.add_argument("--precision", choices=["auto", "bf16", "fp16", "fp32"], default="auto")
     p_train.add_argument("--seed", type=int, default=42)
+    p_train.add_argument(
+        "--best-metric",
+        choices=["ndcg@10", "mrr@10", "recall@1", "recall@3", "recall@5", "recall@10", "exact_match@1"],
+        default="ndcg@10",
+        help="Metric used to select best epoch when --eval-every-epoch is set; saves to <out-dir>/best/",
+    )
+    p_train.add_argument(
+        "--best-benchmark",
+        help="Benchmark set name (without .jsonl) to track for best-epoch selection; defaults to the first one discovered",
+    )
     p_train.add_argument("--out-dir", required=True)
     p_train.set_defaults(func=cmd_train_embedder)
 
@@ -549,6 +575,21 @@ def _parser() -> argparse.ArgumentParser:
     p_idx.add_argument("--retrieval-view", choices=["coordinate", "signature", "semantic", "sdl"], default="semantic")
     p_idx.add_argument("--out-dir", required=True)
     p_idx.set_defaults(func=cmd_build_ann_index)
+
+    p_export = sub.add_parser(
+        "export-ollama",
+        help="Convert a trained SentenceTransformer directory to GGUF + Ollama Modelfile",
+    )
+    p_export.add_argument("--model-dir", required=True, help="Path to the trained model (typically <train-out>/best)")
+    p_export.add_argument("--out-dir", required=True)
+    p_export.add_argument("--tag", default="graphql-embedder")
+    p_export.add_argument(
+        "--quantize",
+        default="f16,Q8_0,Q4_K_M",
+        help="Comma-separated list: any of f16, Q8_0, Q4_K_M (f16 is always produced)",
+    )
+    p_export.add_argument("--llama-cpp-dir", help="Path to a llama.cpp checkout (or set LLAMA_CPP_DIR)")
+    p_export.set_defaults(func=cmd_export_ollama)
 
     return p
 

@@ -55,6 +55,8 @@ class TrainConfig:
     mnrl_mini_batch_size: int = 16
     precision: str = "auto"
     seed: int = 42
+    best_metric: str = "ndcg@10"
+    best_benchmark: str | None = None
 
 
 def _maybe_attach_lora(model: SentenceTransformer, rank: int = 16) -> None:
@@ -301,17 +303,19 @@ def train_biencoder(
             pass
 
     callbacks: list[Any] = []
+    epoch_callback: EpochEvalCallback | None = None
     if cfg.eval_every_epoch and benchmark_sets:
-        callbacks.append(
-            EpochEvalCallback(
-                model=model,
-                corpus_rows=corpus_rows,
-                benchmark_sets=benchmark_sets,
-                out_dir=out_dir,
-                tracking_backend=cfg.tracking_backend,
-                retrieval_view=primary_retrieval_view,
-            )
+        epoch_callback = EpochEvalCallback(
+            model=model,
+            corpus_rows=corpus_rows,
+            benchmark_sets=benchmark_sets,
+            out_dir=out_dir,
+            tracking_backend=cfg.tracking_backend,
+            retrieval_view=primary_retrieval_view,
+            best_metric=cfg.best_metric,
+            best_benchmark=cfg.best_benchmark,
         )
+        callbacks.append(epoch_callback)
 
     trainer = SentenceTransformerTrainer(
         model=model,
@@ -333,6 +337,29 @@ def train_biencoder(
             pass
 
     model.save(str(out_dir))
+
+    best_info: dict | None = None
+    if epoch_callback is not None and epoch_callback.best_dir.exists():
+        best_dir = epoch_callback.best_dir
+        try:
+            best_model = SentenceTransformer(str(best_dir))
+            if cfg.use_lora:
+                try:
+                    first = best_model._first_module()
+                    auto_model = first.auto_model
+                    if hasattr(auto_model, "merge_and_unload"):
+                        first.auto_model = auto_model.merge_and_unload()
+                except Exception:
+                    pass
+            best_model.save(str(best_dir))
+        except Exception:
+            pass
+        info_path = best_dir / "epoch_info.json"
+        if info_path.exists():
+            try:
+                best_info = json.loads(info_path.read_text(encoding="utf-8"))
+            except Exception:
+                best_info = None
 
     manifest = {
         "model_name": cfg.model_name,
@@ -359,6 +386,11 @@ def train_biencoder(
         "mnrl_mini_batch_size": cfg.mnrl_mini_batch_size if cfg.loss == "cached_mnrl" else None,
         "precision": {"bf16": bf16, "fp16": fp16},
         "objective": "multi-negative-ranking-field-coordinate-retrieval" if cfg.loss != "triplet" else "triplet-field-coordinate-retrieval",
+        "best_metric": cfg.best_metric,
+        "best_benchmark": best_info.get("benchmark") if best_info else cfg.best_benchmark,
+        "best_epoch": best_info.get("epoch") if best_info else None,
+        "best_score": best_info.get("score") if best_info else None,
+        "best_dir": str((out_dir / "best").resolve()) if best_info else None,
     }
     (out_dir / "training_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest

@@ -35,7 +35,7 @@ dev = ["pytest>=8.2.0", "ruff>=0.5.0", "mypy>=1.10.0"]
 graphft = "graphql_finetuning_pipeline.cli.main:main"
 
 [tool.setuptools]
-packages = ["graphql_finetuning_pipeline", "graphql_finetuning_pipeline.cli", "graphql_finetuning_pipeline.data", "graphql_finetuning_pipeline.training", "graphql_finetuning_pipeline.retrieval", "graphql_finetuning_pipeline.eval", "graphql_finetuning_pipeline.utils"]
+packages = ["graphql_finetuning_pipeline", "graphql_finetuning_pipeline.cli", "graphql_finetuning_pipeline.data", "graphql_finetuning_pipeline.training", "graphql_finetuning_pipeline.retrieval", "graphql_finetuning_pipeline.eval", "graphql_finetuning_pipeline.utils", "graphql_finetuning_pipeline.deploy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
