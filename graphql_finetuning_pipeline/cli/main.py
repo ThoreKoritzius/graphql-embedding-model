@@ -280,6 +280,12 @@ def cmd_train_embedder(args: argparse.Namespace) -> None:
         eval_every_epoch=args.eval_every_epoch,
         positive_views=parse_positive_views(args.positive_views),
         primary_retrieval_view=args.primary_retrieval_view,
+        loss=args.loss,
+        num_hard_negatives=args.num_hard_negatives,
+        mnrl_scale=args.mnrl_scale,
+        mnrl_mini_batch_size=args.mnrl_mini_batch_size,
+        precision=args.precision,
+        seed=args.seed,
     )
     manifest = train_biencoder(
         train_rows,
@@ -502,6 +508,12 @@ def _parser() -> argparse.ArgumentParser:
     p_train.add_argument("--benchmark-dir")
     p_train.add_argument("--positive-views", default="coordinate,signature,semantic,sdl")
     p_train.add_argument("--primary-retrieval-view", choices=["coordinate", "signature", "semantic", "sdl"], default="semantic")
+    p_train.add_argument("--loss", choices=["cached_mnrl", "mnrl", "triplet"], default="cached_mnrl")
+    p_train.add_argument("--num-hard-negatives", type=int, default=4)
+    p_train.add_argument("--mnrl-scale", type=float, default=20.0)
+    p_train.add_argument("--mnrl-mini-batch-size", type=int, default=16)
+    p_train.add_argument("--precision", choices=["auto", "bf16", "fp16", "fp32"], default="auto")
+    p_train.add_argument("--seed", type=int, default=42)
     p_train.add_argument("--out-dir", required=True)
     p_train.set_defaults(func=cmd_train_embedder)
 

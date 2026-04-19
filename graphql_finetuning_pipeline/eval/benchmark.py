@@ -11,7 +11,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from graphql_finetuning_pipeline.data.models import CorpusRecord, QueryRecord
 from graphql_finetuning_pipeline.data.structural_views import ensure_view_available, get_view_text, normalize_primary_retrieval_view
-from graphql_finetuning_pipeline.eval.metrics import aggregate, mrr_at_k, ndcg_at_k, recall_at_k
+from graphql_finetuning_pipeline.eval.metrics import aggregate, coverage_at_k, mrr_at_k, ndcg_at_k, recall_at_k, set_recall_at_k
 from graphql_finetuning_pipeline.utils.embeddings import encode_with_resolution
 from graphql_finetuning_pipeline.utils.io import ensure_dir, read_jsonl
 
@@ -33,6 +33,10 @@ def _slice_metrics(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
         buckets[f"source:{r.get('source') or 'unknown'}"].append(r)
         for tag in r.get("confuser_tags", []):
             buckets[f"confuser:{tag}"].append(r)
+        if r.get("is_ambiguous"):
+            buckets["ambiguity:multi_relevant"].append(r)
+        else:
+            buckets["ambiguity:single_relevant"].append(r)
     out: dict[str, dict[str, float]] = {}
     for key, vals in buckets.items():
         out[key] = {
@@ -41,6 +45,8 @@ def _slice_metrics(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
             "recall@5": aggregate([v["recall@5"] for v in vals]),
             "mrr@10": aggregate([v["mrr@10"] for v in vals]),
             "ndcg@10": aggregate([v["ndcg@10"] for v in vals]),
+            "set_recall@5": aggregate([v["set_recall@5"] for v in vals]),
+            "coverage@5": aggregate([v["coverage@5"] for v in vals]),
         }
     return out
 
@@ -54,9 +60,14 @@ def evaluate_benchmark_set(rows: list[QueryRecord], corpus_rows: list[CorpusReco
             "recall@3": 0.0,
             "recall@5": 0.0,
             "recall@10": 0.0,
+            "set_recall@5": 0.0,
+            "set_recall@10": 0.0,
+            "coverage@5": 0.0,
+            "coverage@10": 0.0,
             "mrr@10": 0.0,
             "ndcg@10": 0.0,
             "same_owner_wrong_field_rate@1": 0.0,
+            "ambiguity_rate": 0.0,
             "embedding_latency_seconds": {"corpus": 0.0, "queries": 0.0},
             "slice_metrics": {},
             "per_query": [],
@@ -79,24 +90,33 @@ def evaluate_benchmark_set(rows: list[QueryRecord], corpus_rows: list[CorpusReco
         ranked_idx = np.argsort(-sims[i])
         ranked_ids = [corpus_ids[j] for j in ranked_idx[:top_k]]
         top_id = ranked_ids[0] if ranked_ids else ""
+        relevant = list(dict.fromkeys([row.positive_coordinate] + list(row.relevant_coordinates or [])))
+        relevant = [r for r in relevant if r]
+        is_ambiguous = len(relevant) > 1
         per_query.append(
             {
                 "query_id": row.query_id,
                 "query": row.query,
                 "positive_coordinate": row.positive_coordinate,
+                "relevant_coordinates": relevant,
+                "is_ambiguous": is_ambiguous,
                 "intent": row.intent,
                 "difficulty": row.difficulty,
                 "source": row.source,
                 "confuser_tags": row.confuser_tags,
                 "top_k": ranked_ids,
-                "exact_match@1": 1.0 if top_id == row.positive_coordinate else 0.0,
+                "exact_match@1": 1.0 if top_id in relevant else 0.0,
                 "recall@1": recall_at_k(ranked_ids, row.positive_coordinate, 1),
                 "recall@3": recall_at_k(ranked_ids, row.positive_coordinate, 3),
                 "recall@5": recall_at_k(ranked_ids, row.positive_coordinate, 5),
                 "recall@10": recall_at_k(ranked_ids, row.positive_coordinate, 10),
+                "set_recall@5": set_recall_at_k(ranked_ids, relevant, 5, mode="any"),
+                "set_recall@10": set_recall_at_k(ranked_ids, relevant, 10, mode="any"),
+                "coverage@5": coverage_at_k(ranked_ids, relevant, 5),
+                "coverage@10": coverage_at_k(ranked_ids, relevant, 10),
                 "mrr@10": mrr_at_k(ranked_ids, row.positive_coordinate, 10),
                 "ndcg@10": ndcg_at_k(ranked_ids, row.positive_coordinate, 10),
-                "same_owner_wrong_field@1": 1.0 if row.owner_type and top_id and top_id != row.positive_coordinate and top_id.split('.', 1)[0] == row.owner_type else 0.0,
+                "same_owner_wrong_field@1": 1.0 if row.owner_type and top_id and top_id not in relevant and top_id.split('.', 1)[0] == row.owner_type else 0.0,
                 "world_split": row.world_split or "unknown",
             }
         )
@@ -108,9 +128,14 @@ def evaluate_benchmark_set(rows: list[QueryRecord], corpus_rows: list[CorpusReco
         "recall@3": aggregate([x["recall@3"] for x in per_query]),
         "recall@5": aggregate([x["recall@5"] for x in per_query]),
         "recall@10": aggregate([x["recall@10"] for x in per_query]),
+        "set_recall@5": aggregate([x["set_recall@5"] for x in per_query]),
+        "set_recall@10": aggregate([x["set_recall@10"] for x in per_query]),
+        "coverage@5": aggregate([x["coverage@5"] for x in per_query]),
+        "coverage@10": aggregate([x["coverage@10"] for x in per_query]),
         "mrr@10": aggregate([x["mrr@10"] for x in per_query]),
         "ndcg@10": aggregate([x["ndcg@10"] for x in per_query]),
         "same_owner_wrong_field_rate@1": aggregate([x["same_owner_wrong_field@1"] for x in per_query]),
+        "ambiguity_rate": aggregate([1.0 if x["is_ambiguous"] else 0.0 for x in per_query]),
         "embedding_latency_seconds": {"corpus": t1 - t0, "queries": t2 - t1},
         "slice_metrics": _slice_metrics(per_query),
         "per_query": per_query,

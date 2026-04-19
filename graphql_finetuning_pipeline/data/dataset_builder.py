@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import random
 
+import re
+
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from tqdm import tqdm
@@ -13,6 +15,34 @@ from graphql_finetuning_pipeline.data.models import CorpusRecord, QueryRecord
 from graphql_finetuning_pipeline.data.structural_views import corpus_structural_hash
 from graphql_finetuning_pipeline.utils.embeddings import light_embed
 from graphql_finetuning_pipeline.utils.io import ensure_dir, write_json, write_jsonl
+
+
+_CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|[_.]")
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_TRIVIAL_LEAKAGE_TOKENS = {"id", "name", "type", "value", "data", "item", "list", "count", "total", "date", "time"}
+
+
+def _light_stem(token: str) -> str:
+    t = token.lower()
+    for suffix in ("ies", "ing", "ers", "ier", "ied", "ies", "ed", "es", "er", "ly", "s"):
+        if len(t) > len(suffix) + 2 and t.endswith(suffix):
+            return t[: -len(suffix)]
+    return t
+
+
+def _schema_terms_from(owner_type: str, field_name: str) -> set[str]:
+    raw = list(_CAMEL_SPLIT_RE.split(owner_type)) + list(_CAMEL_SPLIT_RE.split(field_name))
+    out: set[str] = set()
+    for part in raw:
+        for tok in _TOKEN_RE.findall((part or "").lower()):
+            if len(tok) < 3 or tok in _TRIVIAL_LEAKAGE_TOKENS:
+                continue
+            out.add(_light_stem(tok))
+    return out
+
+
+def _query_stems(text: str) -> set[str]:
+    return {_light_stem(tok) for tok in _TOKEN_RE.findall(text.lower()) if len(tok) >= 3}
 
 
 @dataclass
@@ -58,6 +88,30 @@ def leakage_filter(rows: list[QueryRecord], canonical_terms: set[str], threshold
         ratio = leaked / max(len(vals), 1)
         if ratio <= threshold:
             out.extend(vals)
+    return out
+
+
+def strict_leakage_filter(rows: list[QueryRecord]) -> list[QueryRecord]:
+    """Row-level leakage guard using stemmed tokens.
+
+    Drops a query when any stemmed token in the query matches a stemmed
+    token from the positive coordinate's owner type or field name. This
+    catches camelCase splits ("authorId" -> {"author", "identifier"}),
+    plurals, and common suffix variants that the world-level
+    ``leakage_filter`` will miss. Trivial scalar tokens like ``id`` or
+    ``name`` are ignored so genuinely generic queries are not dropped.
+    """
+    out: list[QueryRecord] = []
+    for row in rows:
+        owner = row.owner_type or row.positive_coordinate.split(".", 1)[0]
+        field = row.field_name or (row.positive_coordinate.split(".", 1)[1] if "." in row.positive_coordinate else "")
+        schema_stems = _schema_terms_from(owner, field)
+        if not schema_stems:
+            out.append(row)
+            continue
+        if schema_stems & _query_stems(row.query):
+            continue
+        out.append(row)
     return out
 
 
@@ -199,6 +253,8 @@ def build_dataset(openai_seed_rows: list[QueryRecord], corpus: list[CorpusRecord
     for split, rows in seed_by_split.items():
         filtered = ambiguity_filter(rows)
         filtered = leakage_filter(filtered, canonical_terms=canonical_terms, threshold=cfg.leakage_threshold)
+        if split in {"val", "test"}:
+            filtered = strict_leakage_filter(filtered)
         deduped = semantic_dedupe(filtered, threshold=cfg.semantic_dedupe_threshold)
         if split in {"val", "test"} and not deduped and filtered:
             deduped = filtered

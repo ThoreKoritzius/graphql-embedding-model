@@ -39,9 +39,12 @@ is semantically close but still wrong. The retrieval system therefore needs exac
   - `signature`
   - `semantic`
   - `sdl`
-- Generate training data as `anchor -> positive_coordinate -> hard negatives`
+- Generate training data as `anchor -> positive_coordinate -> ranked hard negatives`
+- Train with `CachedMultipleNegativesRankingLoss` (listwise InfoNCE over in-batch + explicit hard negatives) — this matches the product metric `exact_match@1` much more closely than a triplet margin
+- Sample the positive view stochastically each epoch across `coordinate / signature / semantic / sdl` so the model cannot collapse onto one surface form
 - Prefer hard confusers over trivial augmentation
 - Split by schema world so held-out evaluation measures transfer to unseen schemas
+- Apply stem-level leakage filtering on val/test so positives are not solvable by lexical overlap
 - Gate results on a curated challenge eval designed for realistic ambiguity
 
 ## Dataset Philosophy
@@ -76,14 +79,36 @@ Corpus rows store field-level views:
 - `sdl_snippet_text`
 - `retrieval_text`
 
+## Training Objective
+
+The trainer targets the product metric directly: given a natural-language anchor, rank the correct coordinate ahead of *every* other coordinate, not just one random confuser.
+
+Loss: `CachedMultipleNegativesRankingLoss` (InfoNCE with in-batch negatives). Each training row is materialized as:
+
+```
+(anchor, positive, negative_1, ..., negative_N)
+```
+
+- `positive` is sampled stochastically each epoch from the configured `positive_views` (`coordinate / signature / semantic / sdl`). This prevents collapse onto one surface form and multiplies the effective training signal without cartesian explosion of the dataset.
+- `negative_1..N` are the top-ranked mined confusers from the dataset builder (same-owner, same-field-name, same-return-type, semantic). When fewer than `N` mined negatives exist for a row, the remainder are backfilled with random in-corpus coordinates outside `relevant_coordinates`.
+- At loss time each row contributes `1 + N` explicit pairs plus `batch_size - 1` in-batch negatives, so every step optimizes a softmax over roughly `batch_size × (1 + N)` candidates.
+- `cached_mnrl` lets you keep a large effective contrastive batch without OOM by chunking the similarity matrix across mini batches (`--mnrl-mini-batch-size`).
+
+The legacy `triplet` loss is still available via `--loss triplet` for ablations.
+
+Training precision auto-selects `bf16` on recent CUDA, falls back to `fp16`, then `fp32`. Override with `--precision`.
+
 ## Metrics
 
 Primary metrics:
-- `exact_match@1`
-- `recall@1/3/5/10`
-- `mrr@10`
-- `ndcg@10`
-- `same_owner_wrong_field_rate@1`
+- `exact_match@1` — top-1 is in the relevant-coordinate set (counts ambiguous-positive rows correctly)
+- `recall@1/3/5/10` — against the canonical positive coordinate
+- `set_recall@5/10` — any member of `relevant_coordinates` appears in top-k
+- `coverage@5/10` — fraction of `relevant_coordinates` retrieved in top-k (ambiguity-aware)
+- `mrr@10`, `ndcg@10`
+- `same_owner_wrong_field_rate@1` — the characteristic failure mode for GraphQL retrieval
+- `ambiguity_rate` — share of rows with more than one valid coordinate, reported per benchmark
+- Slice metrics break down by `intent`, `difficulty`, `confuser_tag`, and `ambiguity:single_relevant` vs `ambiguity:multi_relevant`
 
 Benchmark sets:
 - `realism_eval`
@@ -128,6 +153,11 @@ graphft train-embedder \
   --corpus artifacts/datasets/v1/corpus.jsonl \
   --positive-views coordinate,signature,semantic,sdl \
   --primary-retrieval-view semantic \
+  --loss cached_mnrl \
+  --num-hard-negatives 4 \
+  --mnrl-scale 20 \
+  --mnrl-mini-batch-size 16 \
+  --precision auto \
   --out-dir artifacts/models/qwen3-field-embedding-ft
 
 graphft eval-retrieval \
@@ -153,4 +183,4 @@ The intended downstream flow is:
 2. Graph/path logic computes `pathsToRoot` for the selected coordinate.
 3. Query planner constructs the executable GraphQL operation.
 
-This repo only covers step 1.
+This repo only covers step 1. The tuned model artifact is consumed by [graphql-mcp-server](graphql-mcp-server/) which serves `list_types` / `run_query` over an embedding index built from the same `coordinate / signature / semantic / sdl` views this pipeline emits. Point the MCP server's `GRAPHQL_EMBED_MODEL` at the local `artifacts/models/qwen3-field-embedding-ft` directory (or a served endpoint hosting it) and reindex — the per-field search text it indexes must match the `retrieval_view` the model was tuned on (default `semantic`).

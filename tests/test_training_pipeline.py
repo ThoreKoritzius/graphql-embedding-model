@@ -17,13 +17,22 @@ def _build_rows():
     return corpus, train_rows
 
 
-def test_build_pair_dataset_contract():
+def test_build_pair_dataset_contract_triplet():
     corpus, train_rows = _build_rows()
     coord_to_docs = {c.coordinate: [c.retrieval_text] for c in corpus}
     primary_docs = {c.coordinate: c.retrieval_text for c in corpus}
-    ds = build_pair_dataset(train_rows, coord_to_docs, primary_docs)
+    ds = build_pair_dataset(train_rows, coord_to_docs, primary_docs, loss="triplet")
     assert len(ds) > 0
     assert set(ds.column_names) == {"anchor", "positive", "negative"}
+
+
+def test_build_pair_dataset_contract_cached_mnrl():
+    corpus, train_rows = _build_rows()
+    coord_to_docs = {c.coordinate: [c.retrieval_text] for c in corpus}
+    primary_docs = {c.coordinate: c.retrieval_text for c in corpus}
+    ds = build_pair_dataset(train_rows, coord_to_docs, primary_docs, loss="cached_mnrl", num_hard_negatives=3)
+    assert len(ds) > 0
+    assert set(ds.column_names) == {"anchor", "positive", "negative_1", "negative_2", "negative_3"}
 
 
 def test_compute_warmup_steps_is_positive_for_tiny_dataset():
