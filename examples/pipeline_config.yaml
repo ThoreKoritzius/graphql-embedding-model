@@ -13,7 +13,7 @@ openai:
   # Optional: point at a directory of real-world GraphQL SDLs (or
   # introspection JSONs). They are ingested as additional worlds and
   # default to the "test" split so transfer to live schemas is measured.
-  # real_schemas_dir: "schemas/real"
+  real_schemas_dir: "schemas/real"
   budget_caps:
     max_requests: 20000
     max_tokens: 15000000
@@ -29,14 +29,12 @@ dataset:
   # 0.97 on the light hash embedder keeps templated paraphrases while
   # collapsing only true duplicates. 0.92 destroyed ~90% of rows.
   semantic_dedupe_threshold: 0.97
-  # World-level leakage threshold. Worlds where > 20% of queries mention
-  # canonical schema terms are dropped. strict_leakage_filter does the
-  # per-row stemmed check on val/test.
-  leakage_threshold: 0.2
-  # Floor for seed-row quality_score. 0.25 admits local-fallback rows
-  # (0.3) when --allow-local-fallback is opted in, and excludes obvious
-  # trash. Raise to 0.7 if you only want OpenAI-sourced rows.
-  min_quality_score: 0.25
+  # World-level leakage threshold. Worlds where > 40% of queries mention
+  # non-trivial canonical schema terms are dropped. strict_leakage_filter
+  # does the per-row stemmed check on val/test.
+  leakage_threshold: 0.4
+  # Floor for seed-row quality_score. 0.7 = OpenAI-sourced rows only.
+  min_quality_score: 0.7
 
 eval:
   benchmark_suites:

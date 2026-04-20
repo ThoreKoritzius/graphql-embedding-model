@@ -311,11 +311,109 @@ def _path_to_root(type_name: str, field_name: str) -> list[str]:
     return [f"{type_name}.{field_name}", f"Query.{type_name[0].lower() + type_name[1:]}"]
 
 
-def _type_fields(type_name: str, domain: str) -> list[dict[str, str]]:
+# Cross-type shared-name pool. Every type in a synthetic world also gets a
+# random subset of these so multiple owner types carry the same field name —
+# which is what turns the pipeline's retrieval task into owner-type
+# disambiguation rather than field-name guessing. Without this, synthetic
+# worlds produce almost no ambiguity and the model has nothing to learn.
+_SHARED_NAME_POOL: list[dict[str, str]] = [
+    {"name": "actor", "type": "User"},
+    {"name": "reporter", "type": "User"},
+    {"name": "owner", "type": "User"},
+    {"name": "assignee", "type": "User"},
+    {"name": "approver", "type": "User"},
+    {"name": "submittedBy", "type": "User"},
+    {"name": "reviewer", "type": "User"},
+    {"name": "recipient", "type": "User"},
+    {"name": "initiator", "type": "User"},
+    {"name": "lastModifiedBy", "type": "User"},
+    {"name": "reference", "type": "String"},
+    {"name": "externalId", "type": "String"},
+    {"name": "channel", "type": "String"},
+    {"name": "source", "type": "String"},
+    {"name": "reason", "type": "String"},
+    {"name": "note", "type": "String"},
+    {"name": "tag", "type": "String"},
+    {"name": "region", "type": "String"},
+    {"name": "locale", "type": "String"},
+]
+
+
+# Hand-written type descriptions. The key trick for training owner-type
+# disambiguation: each type's description has to describe *what the
+# coordinates on that type represent*, not just repeat the type name.
+# "A guest's booked stay at a property" is useful; "Reservation entity in
+# hotels domain" is not. Missing entries fall back to a generic template
+# but with the domain context baked in.
+_TYPE_DESCRIPTIONS: dict[str, str] = {
+    # hotels
+    "Hotel": "A lodging property bookable by guests — has rooms, rates, and a location.",
+    "Room": "An individual sleeping unit within a hotel; has a number, type, and nightly rate.",
+    "Guest": "A person staying at a property; tied to bookings and loyalty accounts.",
+    "Booking": "A tentative reservation hold, before payment and confirmation are finalised.",
+    "Reservation": "A confirmed stay with dates, guests, and a rate lock — the post-payment record.",
+    "Stay": "The actual check-in to check-out event, separate from the reservation intent.",
+    "HotelReview": "A written review of a hotel or stay, posted by a guest after checkout.",
+    "ServiceRequest": "A request for in-stay service (towels, maintenance, room service).",
+    "IncidentReport": "A record of something going wrong during a stay (damage, complaint).",
+    "RefundRequest": "A guest's request to reverse a charge on a reservation or stay.",
+    "MaintenanceTicket": "An internal work order for property upkeep, not guest-facing.",
+    "CheckInRequest": "A guest's digital check-in attempt, before keys are issued.",
+    # shopping
+    "Product": "An item offered for sale; the catalog row, independent of inventory or orders.",
+    "Cart": "A shopper's in-progress selection, before checkout commits it to an order.",
+    "Order": "A committed purchase — carts become orders after successful checkout.",
+    "Customer": "The purchasing end-user account.",
+    "Payment": "A financial transaction attempt tied to one order.",
+    "Shipment": "A physical delivery batch that ships one or more order items.",
+    "ProductReview": "A customer's written review of a product after purchase.",
+    "ReturnRequest": "A customer's request to send back items from a completed order.",
+    "Refund": "A completed reversal of funds to the customer's payment method.",
+    "OrderStatusEvent": "A timestamped event in an order's lifecycle (placed, shipped, delivered).",
+    "AbandonedCartEvent": "A cart that went idle without checkout; generated for re-engagement.",
+    "FraudSignal": "A detected anomaly on an order indicating possible fraud.",
+    "CouponRedemption": "A single use of a coupon code against an order.",
+    # cars
+    "Vehicle": "A specific car (VIN-identified), owned or listed by one party.",
+    "VehicleModel": "A make/model/year definition — a template, not a specific car.",
+    "VehicleListing": "A seller's listing of a specific vehicle for sale.",
+    "OwnerProfile": "The registered owner of a specific vehicle; ties VIN to a person.",
+    "ServiceRecord": "A dated service-shop maintenance entry for a vehicle.",
+    "InspectionReport": "A documented inspection result with a pass/fail verdict.",
+    "PriceQuote": "A dealer's quoted sale price for a listing at a point in time.",
+    "TradeInOffer": "A dealer's proposed trade-in value for a customer's current vehicle.",
+    "TestDriveBooking": "A customer's scheduled test drive appointment at a dealer.",
+    "LeaseContract": "A signed lease agreement between a dealer and a lessee.",
+    "AutoLoan": "A financing agreement against a specific vehicle purchase.",
+    "RecallNotice": "A manufacturer recall announcement affecting a vehicle model or range.",
+    "RepairEstimate": "A shop's written estimate for repair work on a vehicle.",
+}
+
+
+def _describe_type(type_name: str, domain: str) -> str:
+    if type_name in _TYPE_DESCRIPTIONS:
+        return _TYPE_DESCRIPTIONS[type_name]
+    # Fallback keeps domain context so even uncatalogued types disambiguate.
+    return f"{type_name}: an entity in the {domain} domain (auto-described)."
+
+
+def _type_fields(type_name: str, domain: str, rng: random.Random) -> list[dict[str, str]]:
+    """Emit fields for one type, biased toward cross-type ambiguity.
+
+    The returned list always includes: id, createdAt, updatedAt, a small set
+    of role-specific fields keyed on the type name, PLUS 2-3 fields sampled
+    from the shared-name pool so multiple owner types carry the same field
+    name within one world. That shared-name overlap is the prerequisite for
+    the competition-set prompt in openai_seed._user_prompt_competition.
+    """
     lower = type_name.lower()
-    base = [{"name": "id", "type": "ID!"}, {"name": "createdAt", "type": "String"}, {"name": "updatedAt", "type": "String"}]
+    base: list[dict[str, str]] = [
+        {"name": "id", "type": "ID!"},
+        {"name": "createdAt", "type": "String"},
+        {"name": "updatedAt", "type": "String"},
+    ]
     if any(x in lower for x in ["hotel", "property", "facility"]):
-        base += [{"name": "name", "type": "String!"}, {"name": "city", "type": "String"}, {"name": "rating", "type": "Float"}]
+        base += [{"name": "displayName", "type": "String!"}, {"name": "city", "type": "String"}, {"name": "rating", "type": "Float"}]
     elif any(x in lower for x in ["room", "seat", "ticket"]):
         base += [{"name": "label", "type": "String!"}, {"name": "status", "type": "String"}, {"name": "priceCents", "type": "Int"}]
     elif any(x in lower for x in ["order", "reservation", "booking", "invoice", "claim"]):
@@ -325,12 +423,19 @@ def _type_fields(type_name: str, domain: str) -> list[dict[str, str]]:
     elif any(x in lower for x in ["payment", "transaction", "transfer", "payout", "refund"]):
         base += [{"name": "amountCents", "type": "Int!"}, {"name": "currency", "type": "String!"}, {"name": "state", "type": "String"}]
     else:
-        base += [{"name": "name", "type": "String"}, {"name": "status", "type": "String"}, {"name": "description", "type": "String"}]
+        base += [{"name": "displayName", "type": "String"}, {"name": "status", "type": "String"}, {"name": "description", "type": "String"}]
     if any(x in lower for x in ["post", "article", "ticket", "booking", "order", "claim", "report", "review"]):
         base += [{"name": "author", "type": "User"}, {"name": "authorId", "type": "ID"}]
-    if any(x in lower for x in ["customer", "guest", "patient", "owner", "agent", "provider", "passenger", "user"]):
-        base += [{"name": "name", "type": "String"}, {"name": "profile", "type": "String"}]
-    return base[:8]
+
+    # Shared-name pool: inject 2-3 names at random so cross-type ambiguity is
+    # the norm rather than the exception. Seeded per-type via rng so the
+    # choice is stable for a given world.
+    already = {f["name"] for f in base}
+    pool = [p for p in _SHARED_NAME_POOL if p["name"] not in already]
+    rng.shuffle(pool)
+    base += pool[: rng.randint(2, 3)]
+
+    return base[:10]
 
 
 def _type_catalog(domain: str, types: list[str], rng: random.Random, cfg: WorldConfig) -> dict[str, dict]:
@@ -340,7 +445,7 @@ def _type_catalog(domain: str, types: list[str], rng: random.Random, cfg: WorldC
         pool = [x for x in types if x != t]
         neighbors = rng.sample(pool, k=min(n_rel, len(pool))) if pool else []
         aliases = ALIASES.get(t, [t.lower(), f"{t.lower()} record"])[:3]
-        fields = _type_fields(t, domain)
+        fields = _type_fields(t, domain, rng)
         catalog[t] = {
             "type_name": t,
             "domain": domain,
@@ -348,7 +453,7 @@ def _type_catalog(domain: str, types: list[str], rng: random.Random, cfg: WorldC
             "semantic_tags": [domain, "entity"],
             "neighbors": neighbors,
             "fields": fields,
-            "description": f"{t} entity in the {domain} domain.",
+            "description": _describe_type(t, domain),
         }
     return catalog
 
@@ -403,6 +508,7 @@ def generate_schema_worlds(out_dir: Path, cfg: WorldConfig) -> tuple[list[dict],
                     "field_name": field["name"],
                     "return_type": field.get("type", "String"),
                     "description": _field_description(t, field["name"], field.get("type", "String")),
+                    "owner_description": meta.get("description", ""),
                     "aliases": sorted(set(meta["aliases"] + [field["name"].replace("_", " "), field["name"].lower()])),
                     "path_to_root": _path_to_root(t, field["name"]),
                 }

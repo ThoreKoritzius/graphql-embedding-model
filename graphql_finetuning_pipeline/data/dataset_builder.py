@@ -60,42 +60,97 @@ def _normalize_query(text: str) -> str:
     return " ".join(text.lower().split())
 
 
-def semantic_dedupe(rows: list[QueryRecord], threshold: float = 0.9) -> list[QueryRecord]:
+def semantic_dedupe(rows: list[QueryRecord], threshold: float = 0.9, max_per_family: int = 4) -> list[QueryRecord]:
+    """Deduplicate queries in two passes.
+
+    Pass 1 (family-level): within each (world_id, positive_coordinate) group
+    keep at most ``max_per_family`` queries by cosine diversity on the light
+    embedder. This collapses the 4-phrasing clusters GPT generates per field
+    and prevents any single field from dominating the split.
+
+    Pass 2 (global): standard greedy cosine dedupe across all surviving rows
+    at ``threshold``. Removes near-duplicate phrasings that happen to target
+    different fields in different worlds.
+    """
     if not rows:
         return []
-    embs = light_embed([_normalize_query(r.query) for r in rows])
+
+    # Pass 1: per-family cap
+    from collections import defaultdict
+    families: dict[str, list[QueryRecord]] = defaultdict(list)
+    for r in rows:
+        key = f"{r.world_id or 'unknown'}:{r.positive_coordinate}"
+        families[key].append(r)
+
+    after_family: list[QueryRecord] = []
+    for fam_rows in families.values():
+        if len(fam_rows) <= max_per_family:
+            after_family.extend(fam_rows)
+            continue
+        embs = light_embed([_normalize_query(r.query) for r in fam_rows])
+        kept: list[int] = [0]
+        kept_embs = [embs[0]]
+        for i in range(1, len(fam_rows)):
+            sims = cosine_similarity(np.asarray([embs[i]]), np.asarray(kept_embs))[0]
+            if float(np.max(sims)) < threshold:
+                kept.append(i)
+                kept_embs.append(embs[i])
+            if len(kept) >= max_per_family:
+                break
+        after_family.extend(fam_rows[j] for j in kept)
+
+    # Pass 2: global dedup
+    embs2 = light_embed([_normalize_query(r.query) for r in after_family])
     keep: list[QueryRecord] = []
     keep_embs: list[np.ndarray] = []
-    for i, row in enumerate(tqdm(rows, desc="Semantic dedupe", unit="query")):
+    for i, row in enumerate(tqdm(after_family, desc="Semantic dedupe", unit="query")):
         if not keep_embs:
             keep.append(row)
-            keep_embs.append(embs[i])
+            keep_embs.append(embs2[i])
             continue
-        sims = cosine_similarity(np.asarray([embs[i]]), np.asarray(keep_embs))[0]
+        sims = cosine_similarity(np.asarray([embs2[i]]), np.asarray(keep_embs))[0]
         if float(np.max(sims)) < threshold:
             keep.append(row)
-            keep_embs.append(embs[i])
+            keep_embs.append(embs2[i])
     return keep
 
 
-def leakage_filter(rows: list[QueryRecord], canonical_terms: set[str], threshold: float = 0.0) -> list[QueryRecord]:
+_LEAKAGE_TRIVIAL = {
+    "id", "name", "type", "value", "data", "item", "list", "count", "total",
+    "date", "time", "user", "post", "order", "cart", "hotel", "flight", "trip",
+    "product", "catalog", "unit", "text", "body", "record", "mode", "state",
+    "status", "created", "updated", "amount", "price", "active", "label",
+    "title", "notes", "start", "email", "phone", "image", "score", "error",
+    "token", "slug",
+    # Common English words that appear as query verbs/nouns regardless of schema
+    "field", "when", "last", "update", "create", "creation", "unique",
+    "identifier", "display", "number", "model", "case", "times", "member",
+    "which", "what", "this", "that", "with", "from", "have", "does", "used",
+    "tell", "show", "give", "find", "look", "help", "need", "want", "know",
+    "there", "here", "some", "only", "also", "more", "most", "many", "each",
+    "been", "info", "read", "like", "make", "take", "come", "work", "year",
+}
+
+
+def leakage_filter(rows: list[QueryRecord], canonical_terms: set[str], threshold: float = 0.0, world_canonical: dict[str, set[str]] | None = None) -> list[QueryRecord]:
     """World-level leakage guard.
 
     A world is dropped if more than ``threshold`` of its queries contain any
-    *non-trivial* canonical token (length >= 4, not a common English word
-    like ``unit``, ``text``, ``body``, ``time``). Trivial tokens would
-    otherwise nuke entire worlds for natural language that happens to
-    reuse common nouns.
+    non-trivial canonical token from **that world's own schema** (not the
+    global merged corpus). When ``world_canonical`` is provided it is used
+    for per-world lookup; otherwise ``canonical_terms`` is used globally.
+
+    Using per-world canonical prevents real schemas (e.g. GitHub's 6,901
+    fields) from polluting the canonical set with common English words and
+    nuking all synthetic worlds.
     """
-    # Filter canonical to non-trivial tokens only. This must stay in
-    # sync with openai_seed._meaningful_canonical's policy.
-    trivial = {"id", "name", "type", "value", "data", "item", "list", "count", "total", "date", "time", "user", "post", "order", "cart", "hotel", "flight", "trip", "product", "catalog", "unit", "text", "body", "record", "mode"}
-    meaningful = {t for t in canonical_terms if len(t) >= 4 and t not in trivial}
     by_world: dict[str, list[QueryRecord]] = defaultdict(list)
     for r in rows:
         by_world[r.world_id or "unknown"].append(r)
     out: list[QueryRecord] = []
-    for vals in by_world.values():
+    for world_id, vals in by_world.items():
+        terms = world_canonical.get(world_id, canonical_terms) if world_canonical else canonical_terms
+        meaningful = {t for t in terms if len(t) >= 4 and t not in _LEAKAGE_TRIVIAL}
         leaked = sum(1 for row in vals if any(term in row.query.lower() for term in meaningful))
         ratio = leaked / max(len(vals), 1)
         if ratio <= threshold:
@@ -327,7 +382,16 @@ def build_dataset(openai_seed_rows: list[QueryRecord], corpus: list[CorpusRecord
     ensure_dir(dataset_dir)
     ensure_dir(dataset_dir / "benchmarks")
 
+    # Build per-world canonical so the leakage filter uses only each world's
+    # own type/field names — not the global merged set (which includes real
+    # schemas like GHES with 6,901 fields, polluting canonical with common words).
+    world_canonical: dict[str, set[str]] = defaultdict(set)
+    for c in corpus:
+        wid = (c.metadata or {}).get("world_id", "unknown")
+        world_canonical[wid].update({c.coordinate.lower(), c.owner_type.lower(), c.field_name.lower()})
+    # Fallback global set for rows with unknown world_id.
     canonical_terms = {c.coordinate.lower() for c in corpus} | {c.owner_type.lower() for c in corpus} | {c.field_name.lower() for c in corpus}
+
     seed_by_split: dict[str, list[QueryRecord]] = {"train": [], "val": [], "test": []}
     for r in openai_seed_rows:
         split = (r.world_split or r.split or "train").lower()
@@ -348,7 +412,7 @@ def build_dataset(openai_seed_rows: list[QueryRecord], corpus: list[CorpusRecord
 
     for split, rows in seed_by_split.items():
         after_ambiguity = ambiguity_filter(rows)
-        after_world_leakage = leakage_filter(after_ambiguity, canonical_terms=canonical_terms, threshold=cfg.leakage_threshold)
+        after_world_leakage = leakage_filter(after_ambiguity, canonical_terms=canonical_terms, threshold=cfg.leakage_threshold, world_canonical=world_canonical)
         after_strict_leakage = strict_leakage_filter(after_world_leakage) if split in {"val", "test"} else after_world_leakage
         deduped = semantic_dedupe(after_strict_leakage, threshold=cfg.semantic_dedupe_threshold)
         if split in {"val", "test"} and not deduped and after_strict_leakage:

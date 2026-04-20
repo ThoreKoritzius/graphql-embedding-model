@@ -142,6 +142,12 @@ def cmd_generate_openai_seed(args: argparse.Namespace) -> None:
         min_real_row_fraction=args.min_real_row_fraction if args.min_real_row_fraction is not None else float(ocfg.get("min_real_row_fraction", 0.9)),
         real_schemas_dir=args.real_schemas_dir or ocfg.get("real_schemas_dir"),
         phrasings_per_target=args.phrasings_per_target if args.phrasings_per_target is not None else int(ocfg.get("phrasings_per_target", 4)),
+        real_schema_boost=args.real_schema_boost if args.real_schema_boost is not None else int(ocfg.get("real_schema_boost", 3)),
+        competition_set_cap=args.competition_set_cap if args.competition_set_cap is not None else int(ocfg.get("competition_set_cap", 6)),
+        adversarial_mining=(not args.no_adversarial_mining) if args.no_adversarial_mining else bool(ocfg.get("adversarial_mining", True)),
+        adversarial_base_model=args.adversarial_base_model or ocfg.get("adversarial_base_model", "Qwen/Qwen3-Embedding-0.6B"),
+        target_hard_fraction=args.target_hard_fraction if args.target_hard_fraction is not None else float(ocfg.get("target_hard_fraction", 0.55)),
+        target_medium_fraction=args.target_medium_fraction if args.target_medium_fraction is not None else float(ocfg.get("target_medium_fraction", 0.30)),
     )
 
     rows, raw, corpus_rows = generate_openai_seed(
@@ -161,8 +167,8 @@ def cmd_generate_openai_seed(args: argparse.Namespace) -> None:
                 "request_batch_size": cfg.request_batch_size,
                 "max_concurrency": cfg.max_concurrency,
                 "corpus_rows": len(corpus_rows),
-                "seed_pairs_path": str(Path(args.out_dir) / "openai" / "seed_pairs_v1.jsonl"),
-                "raw_path": str(Path(args.out_dir) / "openai" / "raw_seed_responses.jsonl"),
+                "seed_pairs_path": str(Path(args.out_dir) / "openai" / f"seed_pairs_v{args.version}.jsonl"),
+                "raw_path": str(Path(args.out_dir) / "openai" / f"raw_seed_responses_v{args.version}.jsonl"),
                 "world_manifest": str(Path(args.out_dir) / "worlds" / f"v{args.version}" / "manifest.json"),
                 "generated_corpus": str(Path(args.out_dir) / "corpus" / f"types_worlds_v{args.version}.jsonl"),
             },
@@ -511,6 +517,12 @@ def _parser() -> argparse.ArgumentParser:
     p_seed.add_argument("--min-real-row-fraction", type=float, default=None, help="Minimum fraction of rows that must come from OpenAI when an API key is supplied (default 0.9). Below this, generation fails rather than quietly ship mixed data.")
     p_seed.add_argument("--real-schemas-dir", default=None, help="Directory of real-world GraphQL SDLs (.graphql) or introspection JSONs to ingest as additional worlds. Each file becomes a real-schema world and is mixed into seed generation and evaluation.")
     p_seed.add_argument("--phrasings-per-target", type=int, default=None, help="Number of phrasing styles (plain, ellipsis, multi-clause, sibling_confuser) the OpenAI prompt should produce per target coordinate. Default 4.")
+    p_seed.add_argument("--real-schema-boost", type=int, default=None, help="Multiply items_per_world for real-schema worlds. Default 3 (real worlds have more cross-type ambiguity — worth spending more budget there).")
+    p_seed.add_argument("--competition-set-cap", type=int, default=None, help="Max competitors shown per GPT prompt. Default 6. Drop to 4 for denser contrasts on a clean, slow-to-generate set.")
+    p_seed.add_argument("--no-adversarial-mining", action="store_true", help="Skip the base-model adversarial mining step (off by default: ON). Disable for fast local iteration — mining uses Qwen3-Embedding-0.6B which is slow on MPS.")
+    p_seed.add_argument("--adversarial-base-model", default=None, help="Base embedding model used for hard-example mining. Default Qwen/Qwen3-Embedding-0.6B (must match the fine-tune starting checkpoint).")
+    p_seed.add_argument("--target-hard-fraction", type=float, default=None, help="Share of mined rows to keep from the hard bucket (base model wrong). Default 0.55.")
+    p_seed.add_argument("--target-medium-fraction", type=float, default=None, help="Share of mined rows to keep from the medium bucket (base model correct but low margin). Default 0.30. Easy = 1 - hard - medium.")
     p_seed.set_defaults(func=cmd_generate_openai_seed)
 
     p_ds = sub.add_parser("build-dataset")

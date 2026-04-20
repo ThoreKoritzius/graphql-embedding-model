@@ -45,6 +45,12 @@ def _field_catalog_from_corpus(corpus: list[CorpusRecord]) -> list[dict]:
             "field_name": c.field_name,
             "return_type": c.return_type,
             "description": c.description,
+            # Owner descriptions power owner-type disambiguation in the
+            # GPT prompt. parse_schema → build_corpus stores them in
+            # CorpusRecord.metadata["owner_description"]; surfacing here
+            # is what makes real SDLs (GHES, Shopify) usable in the
+            # competition-set prompt.
+            "owner_description": (c.metadata or {}).get("owner_description") or "",
             "aliases": c.aliases,
             "path_to_root": c.path_to_root,
         }
