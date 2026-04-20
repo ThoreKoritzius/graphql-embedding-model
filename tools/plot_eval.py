@@ -83,22 +83,36 @@ def plot_deltas(runs: list[tuple[str, dict, dict]], out: Path) -> None:
 
 
 def plot_recall_at_k(runs: list[tuple[str, dict, dict]], out: Path) -> None:
-    """Recall@K curve for each run."""
-    fig, ax = plt.subplots(figsize=(7, 5))
+    """Recall@K curve: one shared baseline line + one tuned line per run.
+
+    The base model is identical across runs (same checkpoint encoded against
+    the same corpus), so drawing N overlapping baseline lines is clutter.
+    We draw it once as a dashed reference, then each tuned run on top.
+    """
+    fig, ax = plt.subplots(figsize=(7.5, 5))
     ks = [1, 3, 5, 10]
     palette = plt.colormaps["tab10"].colors
-    for ri, (name, base, tuned) in enumerate(runs):
+
+    # Single baseline — use the first run's baseline (they should all match).
+    _, base0, _ = runs[0]
+    b_vals = [base0.get(f"recall@{k}", 0.0) for k in ks]
+    ax.plot(ks, b_vals, marker="o", linestyle="--", color="#888888", linewidth=2,
+            label="baseline (Qwen3-0.6B)", zorder=2)
+
+    for ri, (name, _, tuned) in enumerate(runs):
         c = palette[ri % len(palette)]
-        b_vals = [base.get(f"recall@{k}", 0.0) for k in ks]
         t_vals = [tuned.get(f"recall@{k}", 0.0) for k in ks]
-        ax.plot(ks, b_vals, marker="o", linestyle="--", color=c, alpha=0.6, label=f"{name} / baseline")
-        ax.plot(ks, t_vals, marker="o", linestyle="-", color=c, label=f"{name} / tuned")
+        ax.plot(ks, t_vals, marker="o", linestyle="-", color=c, linewidth=2.2,
+                label=f"tuned — {name}", zorder=3)
+        for k, v in zip(ks, t_vals):
+            ax.annotate(f"{v:.2f}", (k, v), xytext=(0, 8),
+                        textcoords="offset points", ha="center", fontsize=8, color=c)
     ax.set_xticks(ks)
     ax.set_xlabel("K")
     ax.set_ylabel("recall@K")
     ax.set_title("Recall @ K")
     ax.grid(alpha=0.3)
-    ax.legend(fontsize=8)
+    ax.legend(loc="lower right")
     fig.tight_layout()
     fig.savefig(out / "recall_at_k.png", dpi=150)
     print(f"wrote {out / 'recall_at_k.png'}")
