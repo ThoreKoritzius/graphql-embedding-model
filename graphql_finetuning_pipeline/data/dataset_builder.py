@@ -49,9 +49,9 @@ def _query_stems(text: str) -> set[str]:
 class DatasetBuildConfig:
     version: int = 1
     seed: int = 42
-    semantic_dedupe_threshold: float = 0.9
-    leakage_threshold: float = 0.0
-    min_quality_score: float = 0.7
+    semantic_dedupe_threshold: float = 0.97
+    leakage_threshold: float = 0.2
+    min_quality_score: float = 0.25
     target_train_min: int = 10000
     target_train_max: int = 50000
 
@@ -79,12 +79,24 @@ def semantic_dedupe(rows: list[QueryRecord], threshold: float = 0.9) -> list[Que
 
 
 def leakage_filter(rows: list[QueryRecord], canonical_terms: set[str], threshold: float = 0.0) -> list[QueryRecord]:
+    """World-level leakage guard.
+
+    A world is dropped if more than ``threshold`` of its queries contain any
+    *non-trivial* canonical token (length >= 4, not a common English word
+    like ``unit``, ``text``, ``body``, ``time``). Trivial tokens would
+    otherwise nuke entire worlds for natural language that happens to
+    reuse common nouns.
+    """
+    # Filter canonical to non-trivial tokens only. This must stay in
+    # sync with openai_seed._meaningful_canonical's policy.
+    trivial = {"id", "name", "type", "value", "data", "item", "list", "count", "total", "date", "time", "user", "post", "order", "cart", "hotel", "flight", "trip", "product", "catalog", "unit", "text", "body", "record", "mode"}
+    meaningful = {t for t in canonical_terms if len(t) >= 4 and t not in trivial}
     by_world: dict[str, list[QueryRecord]] = defaultdict(list)
     for r in rows:
         by_world[r.world_id or "unknown"].append(r)
     out: list[QueryRecord] = []
     for vals in by_world.values():
-        leaked = sum(1 for row in vals if any(term in row.query.lower() for term in canonical_terms))
+        leaked = sum(1 for row in vals if any(term in row.query.lower() for term in meaningful))
         ratio = leaked / max(len(vals), 1)
         if ratio <= threshold:
             out.extend(vals)
@@ -130,19 +142,76 @@ def ambiguity_filter(rows: list[QueryRecord]) -> list[QueryRecord]:
     return out
 
 
+def _name_stem(name: str) -> str:
+    """Return the "meaningful" stem of a camelCase field name.
+
+    ``status`` -> ``status``. ``statusHistory`` -> ``status`` (prefix).
+    ``currentStatus`` -> ``status`` (suffix after split). Used to cluster
+    fields that a retriever can easily confuse by lexical overlap.
+    """
+    # camelCase split
+    parts: list[str] = []
+    cur = ""
+    for ch in name:
+        if ch.isupper() and cur:
+            parts.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    if cur:
+        parts.append(cur)
+    # Prefer the first part >= 4 chars; otherwise the longest part.
+    candidates = [p.lower() for p in parts if len(p) >= 4]
+    if candidates:
+        return candidates[0]
+    return max((p.lower() for p in parts), key=len, default=name.lower())
+
+
+def _name_similarity_siblings(target: CorpusRecord, corpus_rows: list[CorpusRecord]) -> list[str]:
+    """Coordinates whose field-name shares a stem with the target's field-name.
+
+    This is the cluster that traditional embedders most often fumble:
+    ``Order.status`` vs ``Order.statusHistory`` vs ``Order.currentStatus``.
+    We compute it on the *field* name (not the owner) so same-owner siblings
+    and cross-owner siblings both surface.
+    """
+    stem = _name_stem(target.field_name)
+    if len(stem) < 4:
+        return []
+    siblings: list[str] = []
+    for c in corpus_rows:
+        if c.coordinate == target.coordinate:
+            continue
+        if _name_stem(c.field_name) == stem or stem in c.field_name.lower() or _name_stem(c.field_name) in target.field_name.lower():
+            siblings.append(c.coordinate)
+    return siblings
+
+
 def _mine_negative_coordinates(row: QueryRecord, corpus_by_coord: dict[str, CorpusRecord], corpus_rows: list[CorpusRecord], rng: random.Random) -> tuple[list[str], list[str]]:
     target = corpus_by_coord.get(row.positive_coordinate)
     if target is None:
         return row.negative_coordinates[:8], row.confuser_tags
 
-    same_owner = [c.coordinate for c in corpus_rows if c.owner_type == target.owner_type and c.coordinate != target.coordinate]
-    same_field = [c.coordinate for c in corpus_rows if c.field_name == target.field_name and c.owner_type != target.owner_type]
-    same_return = [c.coordinate for c in corpus_rows if c.return_type == target.return_type and c.coordinate != target.coordinate]
-    semantic = [c.coordinate for c in corpus_rows if c.coordinate != target.coordinate and c.field_name in set(target.aliases)]
+    # Restrict pools to the target's world so negatives are actually
+    # retrievable candidates on that schema. Without this, models trained
+    # with in-batch negatives learn trivial world-discrimination instead of
+    # within-schema field discrimination.
+    target_world = target.metadata.get("world_id")
+    world_pool = [c for c in corpus_rows if c.metadata.get("world_id") == target_world] if target_world else corpus_rows
+
+    same_owner = [c.coordinate for c in world_pool if c.owner_type == target.owner_type and c.coordinate != target.coordinate]
+    same_field = [c.coordinate for c in world_pool if c.field_name == target.field_name and c.owner_type != target.owner_type]
+    same_return = [c.coordinate for c in world_pool if c.return_type == target.return_type and c.coordinate != target.coordinate]
+    semantic = [c.coordinate for c in world_pool if c.coordinate != target.coordinate and c.field_name in set(target.aliases or [])]
+    name_siblings = _name_similarity_siblings(target, world_pool)
 
     negatives: list[str] = list(row.negative_coordinates)
     tags: list[str] = list(row.confuser_tags)
+    # Order matters: the first negative tends to be the "hardest" in the
+    # multi-negative-ranking loss because in-batch collision rates are
+    # higher at low positions. Prioritize name-similarity siblings.
     for tag, pool in [
+        ("name_similarity", name_siblings),
         ("structural", same_owner),
         ("lexical", same_field),
         ("argument-shape", same_return),
@@ -152,8 +221,9 @@ def _mine_negative_coordinates(row: QueryRecord, corpus_by_coord: dict[str, Corp
             negatives.append(rng.choice(pool))
             tags.append(tag)
     if len(negatives) < 5:
-        pool = [c.coordinate for c in corpus_rows if c.coordinate != target.coordinate and c.coordinate not in negatives]
-        negatives.extend(rng.sample(pool, k=min(5 - len(negatives), len(pool))))
+        pool = [c.coordinate for c in world_pool if c.coordinate != target.coordinate and c.coordinate not in negatives]
+        if pool:
+            negatives.extend(rng.sample(pool, k=min(5 - len(negatives), len(pool))))
     return list(dict.fromkeys(negatives))[:8], list(dict.fromkeys(tags))
 
 
@@ -173,13 +243,34 @@ def _curated_queries_for_field(row: CorpusRecord, domain: str) -> list[tuple[str
         "email": [("What field stores the email address?", "lookup", "obvious")],
     }
     picked = templates.get(row.field_name, [(f"Which field gives me the {hint}?", "lookup", "obvious")])
-    return [(f"[{domain}] {q}", intent, slice_name) for q, intent, slice_name in picked]
+    return [(q, intent, slice_name) for q, intent, slice_name in picked]
 
 
 def build_benchmark_suites(split_rows: list[QueryRecord], corpus: list[CorpusRecord]) -> dict[str, list[QueryRecord]]:
-    realism_eval = [r for r in split_rows if r.split == "test" and not r.adversarial_tags]
-    adversarial_eval = [r for r in split_rows if r.split == "test" and r.adversarial_tags]
-    synthetic_holdout = [r for r in split_rows if r.split == "test"]
+    real_world_ids = {c.metadata.get("world_id") for c in corpus if c.metadata.get("source") == "real-schema"}
+    test_rows = [r for r in split_rows if r.split == "test"]
+
+    # realism_eval: the "looks-like-live-traffic" subset. Plain/ellipsis/
+    # multi-clause rows without adversarial tagging. Leakage is NOT
+    # re-applied here (it was applied upstream per-row); real users often
+    # do mention partial schema tokens, so this benchmark is deliberately
+    # closer to live conditions.
+    realism_eval = [r for r in test_rows if not r.adversarial_tags]
+
+    # adversarial_eval: the sibling-confuser / root-vs-nested slice where
+    # a naive retriever is supposed to fail. This is the hardest slice.
+    adversarial_eval = [r for r in test_rows if r.adversarial_tags]
+
+    # ambiguity_eval: rows with ≥2 valid coordinates (path-to-root ambiguity).
+    # Evaluated with coverage@k and set_recall@k, not strict top1.
+    ambiguity_eval = [r for r in test_rows if len(r.relevant_coordinates or []) > 1]
+
+    # real_schema_eval: test-set rows whose world is a real (ingested) SDL,
+    # not a synthetic world. This is the honest transfer metric. Empty when
+    # no real schemas were ingested.
+    real_schema_eval = [r for r in test_rows if r.world_id in real_world_ids] if real_world_ids else []
+
+    synthetic_holdout = test_rows
 
     curated_eval: list[QueryRecord] = []
     test_corpus = [c for c in corpus if c.metadata.get("world_id") and any(r.world_id == c.metadata.get("world_id") and r.split == "test" for r in split_rows)]
@@ -219,12 +310,16 @@ def build_benchmark_suites(split_rows: list[QueryRecord], corpus: list[CorpusRec
         if len(curated_eval) >= 200:
             break
 
-    return {
+    suites = {
         "realism_eval": realism_eval,
         "adversarial_eval": adversarial_eval,
         "synthetic_holdout": synthetic_holdout,
         "curated_challenge_eval": curated_eval,
+        "ambiguity_eval": ambiguity_eval,
     }
+    if real_schema_eval:
+        suites["real_schema_eval"] = real_schema_eval
+    return suites
 
 
 def build_dataset(openai_seed_rows: list[QueryRecord], corpus: list[CorpusRecord], out_dir: Path, schema_hash: str, cfg: DatasetBuildConfig, generation_config: dict) -> dict:
@@ -247,22 +342,30 @@ def build_dataset(openai_seed_rows: list[QueryRecord], corpus: list[CorpusRecord
     split_rows: list[QueryRecord] = []
     pre_filter_counts = {k: len(v) for k, v in seed_by_split.items()}
     post_filter_counts: dict[str, int] = {}
+    stage_counts: dict[str, dict[str, int]] = {}
     rng = random.Random(cfg.seed)
     corpus_by_coord = {c.coordinate: c for c in corpus}
 
     for split, rows in seed_by_split.items():
-        filtered = ambiguity_filter(rows)
-        filtered = leakage_filter(filtered, canonical_terms=canonical_terms, threshold=cfg.leakage_threshold)
-        if split in {"val", "test"}:
-            filtered = strict_leakage_filter(filtered)
-        deduped = semantic_dedupe(filtered, threshold=cfg.semantic_dedupe_threshold)
-        if split in {"val", "test"} and not deduped and filtered:
-            deduped = filtered
+        after_ambiguity = ambiguity_filter(rows)
+        after_world_leakage = leakage_filter(after_ambiguity, canonical_terms=canonical_terms, threshold=cfg.leakage_threshold)
+        after_strict_leakage = strict_leakage_filter(after_world_leakage) if split in {"val", "test"} else after_world_leakage
+        deduped = semantic_dedupe(after_strict_leakage, threshold=cfg.semantic_dedupe_threshold)
+        if split in {"val", "test"} and not deduped and after_strict_leakage:
+            deduped = after_strict_leakage
         updated: list[QueryRecord] = []
         for row in deduped:
             negatives, tags = _mine_negative_coordinates(row, corpus_by_coord, corpus, rng)
             updated.append(row.model_copy(update={"negative_coordinates": negatives, "confuser_tags": tags, "relevant_coordinates": row.relevant_coordinates or [row.positive_coordinate]}))
         post_filter_counts[split] = len(updated)
+        stage_counts[split] = {
+            "pre_filter": len(rows),
+            "after_ambiguity": len(after_ambiguity),
+            "after_world_leakage": len(after_world_leakage),
+            "after_strict_leakage": len(after_strict_leakage),
+            "after_semantic_dedupe": len(deduped),
+            "final": len(updated),
+        }
         split_rows.extend([r.model_copy(update={"split": split}) for r in updated])
 
     if not [r for r in split_rows if r.split == "train"]:
@@ -275,6 +378,52 @@ def build_dataset(openai_seed_rows: list[QueryRecord], corpus: list[CorpusRecord
     for name, rows_ in benches.items():
         write_jsonl(dataset_dir / "benchmarks" / f"{name}.jsonl", [r.model_dump() for r in rows_])
 
+    source_counts = dict(Counter([r.source or "unknown" for r in split_rows]))
+    intent_counts = dict(Counter([r.intent or "unknown" for r in split_rows]))
+    sample_rng = random.Random(cfg.seed + 1)
+    sample_rows = sample_rng.sample(split_rows, k=min(20, len(split_rows)))
+    sanity_sample = [
+        {
+            "split": r.split,
+            "query": r.query,
+            "positive_coordinate": r.positive_coordinate,
+            "intent": r.intent,
+            "source": r.source,
+            "quality_score": r.quality_score,
+            "negatives": r.negative_coordinates[:4],
+        }
+        for r in sample_rows
+    ]
+
+    sanity_report = {
+        "pre_filter_split_counts": pre_filter_counts,
+        "per_stage_counts": stage_counts,
+        "post_filter_split_counts": post_filter_counts,
+        "source_counts": source_counts,
+        "intent_counts": intent_counts,
+        "fallback_share": round(
+            sum(v for k, v in source_counts.items() if "fallback" in k) / max(sum(source_counts.values()), 1),
+            4,
+        ),
+        "config": {
+            "semantic_dedupe_threshold": cfg.semantic_dedupe_threshold,
+            "leakage_threshold": cfg.leakage_threshold,
+            "min_quality_score": cfg.min_quality_score,
+        },
+        "warnings": [],
+    }
+    if sanity_report["fallback_share"] >= 0.5:
+        sanity_report["warnings"].append(
+            f"{sanity_report['fallback_share']:.0%} of post-filter rows are from the local fallback. "
+            "Expect noticeably lower model quality than an OpenAI-sourced run."
+        )
+    for split, counts in stage_counts.items():
+        if counts["pre_filter"] > 0 and counts["final"] / counts["pre_filter"] < 0.2:
+            sanity_report["warnings"].append(
+                f"Aggressive filtering on split '{split}': {counts['final']}/{counts['pre_filter']} rows survived "
+                "(<20%). Check semantic_dedupe_threshold and leakage_threshold."
+            )
+
     manifest = {
         "version": cfg.version,
         "schema_hash": schema_hash,
@@ -284,6 +433,9 @@ def build_dataset(openai_seed_rows: list[QueryRecord], corpus: list[CorpusRecord
         "counts": dict(Counter([r.split for r in split_rows])),
         "seed_split_counts": pre_filter_counts,
         "post_filter_split_counts": post_filter_counts,
+        "per_stage_counts": stage_counts,
+        "source_counts": source_counts,
+        "intent_counts": intent_counts,
         "world_split_counts": dict(Counter([r.world_split or "unknown" for r in split_rows])),
         "domain_counts": dict(Counter([r.domain or "unknown" for r in split_rows])),
         "seed_rows": len(openai_seed_rows),
@@ -295,7 +447,10 @@ def build_dataset(openai_seed_rows: list[QueryRecord], corpus: list[CorpusRecord
         },
         "dataset_dir": str(dataset_dir.resolve()),
         "release_gate_benchmark": "curated_challenge_eval",
+        "sanity_warnings": sanity_report["warnings"],
     }
     write_json(dataset_dir / "manifest.json", manifest)
+    write_json(dataset_dir / "sanity_report.json", sanity_report)
+    write_jsonl(dataset_dir / "sanity_sample.jsonl", sanity_sample)
     write_jsonl(dataset_dir / "corpus.jsonl", [c.model_dump() for c in corpus])
     return manifest

@@ -202,6 +202,14 @@ def _resolve_precision(precision: str) -> tuple[bool, bool]:
     return False, False
 
 
+def _is_cuda_available() -> bool:
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
+
 def _build_loss(loss_name: str, model: SentenceTransformer, cfg: TrainConfig):
     loss_name = loss_name.lower()
     if loss_name == "triplet":
@@ -209,8 +217,11 @@ def _build_loss(loss_name: str, model: SentenceTransformer, cfg: TrainConfig):
     if loss_name == "mnrl":
         return losses.MultipleNegativesRankingLoss(model=model, scale=cfg.mnrl_scale)
     if loss_name == "cached_mnrl":
+        # CachedMultipleNegativesRankingLoss uses torch.utils.checkpoint which
+        # requires CUDA device context (torch.mps.device doesn't exist). Fall
+        # back to the non-cached variant on MPS/CPU.
         cached = getattr(losses, "CachedMultipleNegativesRankingLoss", None)
-        if cached is None:
+        if cached is None or not _is_cuda_available():
             return losses.MultipleNegativesRankingLoss(model=model, scale=cfg.mnrl_scale)
         return cached(model=model, scale=cfg.mnrl_scale, mini_batch_size=cfg.mnrl_mini_batch_size)
     raise ValueError(f"Unknown loss '{loss_name}'. Valid: {sorted(LOSS_CHOICES)}")
@@ -274,7 +285,20 @@ def train_biencoder(
     warmup_steps = compute_warmup_steps(len(train_dataset), cfg.batch_size, cfg.epochs)
     bf16, fp16 = _resolve_precision(cfg.precision)
 
-    args = SentenceTransformerTrainingArguments(
+    available_prompts = getattr(model, "prompts", None) or {}
+    column_prompts: dict[str, str] = {}
+    if "query" in available_prompts:
+        column_prompts["anchor"] = "query"
+    doc_prompt = "document" if "document" in available_prompts else None
+    if doc_prompt is not None:
+        column_prompts["positive"] = doc_prompt
+        if cfg.loss in {"mnrl", "cached_mnrl"}:
+            for i in range(1, cfg.num_hard_negatives + 1):
+                column_prompts[f"negative_{i}"] = doc_prompt
+        else:
+            column_prompts["negative"] = doc_prompt
+
+    training_kwargs: dict[str, Any] = dict(
         output_dir=str(out_dir),
         num_train_epochs=cfg.epochs,
         per_device_train_batch_size=cfg.batch_size,
@@ -293,6 +317,14 @@ def train_biencoder(
         run_name=cfg.experiment_name,
         seed=cfg.seed,
     )
+    if column_prompts:
+        training_kwargs["prompts"] = column_prompts
+
+    try:
+        args = SentenceTransformerTrainingArguments(**training_kwargs)
+    except TypeError:
+        training_kwargs.pop("prompts", None)
+        args = SentenceTransformerTrainingArguments(**training_kwargs)
 
     if cfg.tracking_backend == "mlflow":
         try:
@@ -385,6 +417,7 @@ def train_biencoder(
         "mnrl_scale": cfg.mnrl_scale if cfg.loss != "triplet" else None,
         "mnrl_mini_batch_size": cfg.mnrl_mini_batch_size if cfg.loss == "cached_mnrl" else None,
         "precision": {"bf16": bf16, "fp16": fp16},
+        "column_prompts": column_prompts,
         "objective": "multi-negative-ranking-field-coordinate-retrieval" if cfg.loss != "triplet" else "triplet-field-coordinate-retrieval",
         "best_metric": cfg.best_metric,
         "best_benchmark": best_info.get("benchmark") if best_info else cfg.best_benchmark,

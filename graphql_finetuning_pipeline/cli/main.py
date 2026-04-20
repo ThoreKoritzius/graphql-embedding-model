@@ -138,6 +138,10 @@ def cmd_generate_openai_seed(args: argparse.Namespace) -> None:
         world_count=args.world_count if args.world_count is not None else int(wcfg.get("world_count", 60)),
         min_types_per_world=args.min_types if args.min_types is not None else int(wcfg.get("min_types", 20)),
         max_types_per_world=args.max_types if args.max_types is not None else int(wcfg.get("max_types", 36)),
+        allow_local_fallback=args.allow_local_fallback or bool(ocfg.get("allow_local_fallback", False)),
+        min_real_row_fraction=args.min_real_row_fraction if args.min_real_row_fraction is not None else float(ocfg.get("min_real_row_fraction", 0.9)),
+        real_schemas_dir=args.real_schemas_dir or ocfg.get("real_schemas_dir"),
+        phrasings_per_target=args.phrasings_per_target if args.phrasings_per_target is not None else int(ocfg.get("phrasings_per_target", 4)),
     )
 
     rows, raw, corpus_rows = generate_openai_seed(
@@ -179,6 +183,9 @@ def cmd_build_dataset(args: argparse.Namespace) -> None:
         seed=args.seed,
         target_train_min=args.target_train_min if args.target_train_min is not None else int(dcfg.get("target_train_min", 20000)),
         target_train_max=args.target_train_max if args.target_train_max is not None else int(dcfg.get("target_train_max", 50000)),
+        semantic_dedupe_threshold=args.semantic_dedupe_threshold if args.semantic_dedupe_threshold is not None else float(dcfg.get("semantic_dedupe_threshold", 0.97)),
+        leakage_threshold=args.leakage_threshold if args.leakage_threshold is not None else float(dcfg.get("leakage_threshold", 0.2)),
+        min_quality_score=args.min_quality_score if args.min_quality_score is not None else float(dcfg.get("min_quality_score", 0.25)),
     )
 
     schema_hash = ""
@@ -419,6 +426,35 @@ def cmd_build_ann_index(args: argparse.Namespace) -> None:
     print(json.dumps(config, indent=2))
 
 
+def cmd_merge_curated_benchmark(args: argparse.Namespace) -> None:
+    from graphql_finetuning_pipeline.eval.curated_benchmark import merge_curated_benchmark
+
+    corpus = _load_corpus(Path(args.corpus))
+    out_dir = Path(args.dataset_dir)
+    result = merge_curated_benchmark(Path(args.curated), corpus, out_dir, name=args.name)
+    print(json.dumps(result, indent=2))
+
+
+def cmd_ingest_real_schemas(args: argparse.Namespace) -> None:
+    from graphql_finetuning_pipeline.data.real_schemas import RealSchemaConfig, ingest_real_schemas
+
+    overrides: dict[str, str] = {}
+    for spec in args.split_override or []:
+        if "=" not in spec:
+            raise ValueError(f"--split-override expects name=split, got: {spec}")
+        n, s = spec.split("=", 1)
+        overrides[n.strip()] = s.strip()
+    worlds, corpus_rows = ingest_real_schemas(
+        sdl_dir=Path(args.sdl_dir),
+        out_dir=Path(args.out_dir),
+        cfg=RealSchemaConfig(version=args.version, real_split_overrides=overrides or None),
+    )
+    corpus_path = Path(args.out_dir) / "corpus" / f"types_real_v{args.version}.jsonl"
+    ensure_dir(corpus_path.parent)
+    write_jsonl(corpus_path, [c.model_dump() for c in corpus_rows])
+    print(json.dumps({"worlds": len(worlds), "corpus_rows": len(corpus_rows), "corpus_path": str(corpus_path)}, indent=2))
+
+
 def cmd_export_ollama(args: argparse.Namespace) -> None:
     from graphql_finetuning_pipeline.deploy.ollama_export import export_to_ollama
 
@@ -471,6 +507,10 @@ def _parser() -> argparse.ArgumentParser:
     p_seed.add_argument("--seed", type=int, default=42)
     p_seed.add_argument("--api-key")
     p_seed.add_argument("--mock-responses-path")
+    p_seed.add_argument("--allow-local-fallback", action="store_true", help="Opt in to the template-based local fallback when the OpenAI API is unreachable. Off by default — silent fallback has previously produced mislabeled data.")
+    p_seed.add_argument("--min-real-row-fraction", type=float, default=None, help="Minimum fraction of rows that must come from OpenAI when an API key is supplied (default 0.9). Below this, generation fails rather than quietly ship mixed data.")
+    p_seed.add_argument("--real-schemas-dir", default=None, help="Directory of real-world GraphQL SDLs (.graphql) or introspection JSONs to ingest as additional worlds. Each file becomes a real-schema world and is mixed into seed generation and evaluation.")
+    p_seed.add_argument("--phrasings-per-target", type=int, default=None, help="Number of phrasing styles (plain, ellipsis, multi-clause, sibling_confuser) the OpenAI prompt should produce per target coordinate. Default 4.")
     p_seed.set_defaults(func=cmd_generate_openai_seed)
 
     p_ds = sub.add_parser("build-dataset")
@@ -482,6 +522,9 @@ def _parser() -> argparse.ArgumentParser:
     p_ds.add_argument("--seed", type=int, default=42)
     p_ds.add_argument("--target-train-min", type=int)
     p_ds.add_argument("--target-train-max", type=int)
+    p_ds.add_argument("--semantic-dedupe-threshold", type=float, default=None, help="Cosine-similarity threshold above which two queries are treated as near-duplicates (default 0.97 on the light hash embedder). Lower = more aggressive dedupe.")
+    p_ds.add_argument("--leakage-threshold", type=float, default=None, help="Max fraction of a world's queries that may contain canonical schema terms before the whole world is dropped (default 0.2). Complementary to strict_leakage_filter on val/test.")
+    p_ds.add_argument("--min-quality-score", type=float, default=None, help="Seed rows with quality_score below this are excluded (default 0.25, which admits local-fallback rows at 0.3).")
     p_ds.add_argument("--schema-hash")
     p_ds.add_argument("--schema-hash-file")
     p_ds.add_argument("--openai-model", default="gpt-4o-mini")
@@ -590,6 +633,26 @@ def _parser() -> argparse.ArgumentParser:
     )
     p_export.add_argument("--llama-cpp-dir", help="Path to a llama.cpp checkout (or set LLAMA_CPP_DIR)")
     p_export.set_defaults(func=cmd_export_ollama)
+
+    p_curated = sub.add_parser(
+        "merge-curated-benchmark",
+        help="Merge a hand-written JSONL of realistic queries into <dataset-dir>/benchmarks/<name>.jsonl as the release gate.",
+    )
+    p_curated.add_argument("--curated", required=True, help="Path to a JSONL file; see examples/curated_realism_eval.template.jsonl")
+    p_curated.add_argument("--corpus", required=True, help="Path to the built corpus.jsonl (used to validate coordinates).")
+    p_curated.add_argument("--dataset-dir", required=True, help="Path to artifacts/datasets/v<N>")
+    p_curated.add_argument("--name", default="curated_realism_eval")
+    p_curated.set_defaults(func=cmd_merge_curated_benchmark)
+
+    p_real = sub.add_parser(
+        "ingest-real-schemas",
+        help="Parse a directory of real GraphQL SDLs / introspection JSONs into world-compatible corpus rows, separate from generate-openai-seed.",
+    )
+    p_real.add_argument("--sdl-dir", required=True, help="Directory containing .graphql and/or introspection .json files")
+    p_real.add_argument("--out-dir", required=True)
+    p_real.add_argument("--version", type=int, default=1)
+    p_real.add_argument("--split-override", action="append", help="Repeatable name=split pairs, e.g. shopify.graphql=test")
+    p_real.set_defaults(func=cmd_ingest_real_schemas)
 
     return p
 

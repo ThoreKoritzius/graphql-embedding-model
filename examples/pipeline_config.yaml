@@ -5,6 +5,15 @@ openai:
   items_per_world: 240
   request_batch_size: 40
   max_concurrency: 4
+  allow_local_fallback: false
+  min_real_row_fraction: 0.9
+  # Number of phrasing styles the prompt asks for per target coordinate.
+  # 4 = plain + ellipsis + multi_clause + sibling_confuser.
+  phrasings_per_target: 4
+  # Optional: point at a directory of real-world GraphQL SDLs (or
+  # introspection JSONs). They are ingested as additional worlds and
+  # default to the "test" split so transfer to live schemas is measured.
+  # real_schemas_dir: "schemas/real"
   budget_caps:
     max_requests: 20000
     max_tokens: 15000000
@@ -17,8 +26,17 @@ worlds:
 dataset:
   target_train_min: 200000
   target_train_max: 500000
-  semantic_dedupe_threshold: 0.92
-  leakage_threshold: 0.02
+  # 0.97 on the light hash embedder keeps templated paraphrases while
+  # collapsing only true duplicates. 0.92 destroyed ~90% of rows.
+  semantic_dedupe_threshold: 0.97
+  # World-level leakage threshold. Worlds where > 20% of queries mention
+  # canonical schema terms are dropped. strict_leakage_filter does the
+  # per-row stemmed check on val/test.
+  leakage_threshold: 0.2
+  # Floor for seed-row quality_score. 0.25 admits local-fallback rows
+  # (0.3) when --allow-local-fallback is opted in, and excludes obvious
+  # trash. Raise to 0.7 if you only want OpenAI-sourced rows.
+  min_quality_score: 0.25
 
 eval:
   benchmark_suites:

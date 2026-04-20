@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -37,12 +38,28 @@ def _validate_local_model_dir(path: Path) -> None:
         )
 
 
+@lru_cache(maxsize=4)
+def _load_sentence_transformer(resolved: str):
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer(resolved)
+
+
 def encode_with_resolution(
     model_ref: str,
     texts: list[str],
     *,
     allow_remote_fallback: bool = True,
+    prompt_name: str | None = None,
 ) -> np.ndarray:
+    """Encode texts with a SentenceTransformer reference, honoring an optional prompt.
+
+    ``prompt_name`` selects one of the prompt templates declared in the model's
+    ``config_sentence_transformers.json`` (e.g. ``"query"`` or ``"document"`` for
+    Qwen3-Embedding). Passing ``None`` disables prompt injection entirely so
+    callers can opt out. The fine-tuned Qwen3 checkpoint ships with a non-empty
+    ``query`` prompt; not forwarding it here causes a silent representation
+    mismatch between training and eval.
+    """
     model_path = Path(model_ref).expanduser()
     local_ref = is_local_model_reference(model_ref)
 
@@ -55,11 +72,18 @@ def encode_with_resolution(
         _validate_local_model_dir(model_path)
 
     try:
-        from sentence_transformers import SentenceTransformer
-
         resolved = str(model_path) if local_ref else model_ref
-        model = SentenceTransformer(resolved)
-        emb = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+        model = _load_sentence_transformer(resolved)
+        encode_kwargs: dict = {"normalize_embeddings": True, "show_progress_bar": False}
+        if prompt_name is not None:
+            available = getattr(model, "prompts", None) or {}
+            if prompt_name in available:
+                encode_kwargs["prompt_name"] = prompt_name
+        try:
+            emb = model.encode(texts, **encode_kwargs)
+        except TypeError:
+            encode_kwargs.pop("prompt_name", None)
+            emb = model.encode(texts, **encode_kwargs)
         return np.asarray(emb, dtype=np.float32)
     except Exception as exc:
         if local_ref:

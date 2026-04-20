@@ -51,9 +51,9 @@ def evaluate(eval_rows: list[QueryRecord], corpus_rows: list[CorpusRecord], mode
     corpus_texts = [get_view_text(c, view) for c in corpus_rows]
 
     t0 = time.perf_counter()
-    corpus_emb = encode_with_resolution(model_path_or_name, corpus_texts, allow_remote_fallback=True)
+    corpus_emb = encode_with_resolution(model_path_or_name, corpus_texts, allow_remote_fallback=True, prompt_name="document")
     t1 = time.perf_counter()
-    query_emb = encode_with_resolution(model_path_or_name, [q.query for q in eval_rows], allow_remote_fallback=True)
+    query_emb = encode_with_resolution(model_path_or_name, [q.query for q in eval_rows], allow_remote_fallback=True, prompt_name="query")
     t2 = time.perf_counter()
 
     sims = cosine_similarity(query_emb, corpus_emb)

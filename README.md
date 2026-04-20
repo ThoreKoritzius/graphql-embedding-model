@@ -133,20 +133,48 @@ OPENAI_API_KEY=...
 WANDB_API_KEY=...
 ```
 
-## Main Workflow
+## Production workflow
+
+The production workflow mixes synthetic worlds with one or more real GraphQL schemas, generates phrasing-diverse OpenAI queries per target, validates the dataset with a sanity report, trains with listwise MNRL + prompt-aware encoding, and gates releases on a hand-curated realism benchmark.
 
 ```bash
+# 0. Drop your target schema(s) into schemas/real/
+#    (.graphql SDL or introspection .json).
+#    Starter set of four open-source schemas is already checked in:
+#    GitHub Enterprise Server, Saleor, Shopify Storefront, AniList.
+#    See schemas/real/README.md for sources and provenance.
+mkdir -p schemas/real
+# optionally add your own: cp ~/path/to/target.graphql schemas/real/
+
+# 1. Generate seed queries against synthetic worlds + real schemas.
+#    Fails loudly if OPENAI_API_KEY is missing (no silent local fallback).
+export OPENAI_API_KEY=sk-...
 graphft generate-openai-seed \
   --out-dir artifacts \
   --version 1 \
-  --config examples/pipeline_config.yaml
+  --config examples/pipeline_config.yaml \
+  --real-schemas-dir schemas/real \
+  --phrasings-per-target 4
 
+# 2. Build dataset. Per-stage sanity report is written to
+#    artifacts/datasets/v1/sanity_report.json; eyeball
+#    sanity_sample.jsonl before you burn GPU.
 graphft build-dataset \
   --corpus artifacts/corpus/types_worlds_v1.jsonl \
   --openai-seed artifacts/openai/seed_pairs_v1.jsonl \
   --out-dir artifacts \
-  --version 1
+  --version 1 \
+  --config examples/pipeline_config.yaml
 
+# 3. Merge your hand-written release-gate benchmark. Write ≥100 rows
+#    by hand against your real schema - the best ROI in the pipeline.
+#    See examples/curated_realism_eval.template.jsonl for the format.
+graphft merge-curated-benchmark \
+  --curated path/to/my_curated.jsonl \
+  --corpus artifacts/datasets/v1/corpus.jsonl \
+  --dataset-dir artifacts/datasets/v1
+
+# 4. Train with CachedMultipleNegativesRankingLoss + prompt-aware encoding.
 graphft train-embedder \
   --train artifacts/datasets/v1/train.jsonl \
   --val artifacts/datasets/v1/val.jsonl \
@@ -158,8 +186,15 @@ graphft train-embedder \
   --mnrl-scale 20 \
   --mnrl-mini-batch-size 16 \
   --precision auto \
+  --eval-every-epoch \
+  --benchmark-dir artifacts/datasets/v1/benchmarks \
+  --best-metric ndcg@10 \
+  --best-benchmark curated_realism_eval \
   --out-dir artifacts/models/qwen3-field-embedding-ft
 
+# 5. Evaluate head-to-head against the base Qwen3 on the held-out test set,
+#    then across every benchmark suite (realism / adversarial / ambiguity /
+#    real_schema / curated_realism).
 graphft eval-retrieval \
   --eval-set artifacts/datasets/v1/test.jsonl \
   --corpus artifacts/datasets/v1/corpus.jsonl \
@@ -175,6 +210,20 @@ graphft run-benchmark \
   --retrieval-view semantic \
   --out-dir artifacts/eval/benchmarks_v1
 ```
+
+The release gate is `curated_realism_eval` on `exact_match@1` and `ndcg@10`, with `real_schema_eval` as the cross-check that transfer to live GraphQL actually happened. Synthetic-holdout metrics are informative but not decision-making.
+
+### Benchmark suite reference
+
+| Suite | What it measures | Gate? |
+|---|---|---|
+| `synthetic_holdout` | Test-split rows on unseen synthetic worlds | no |
+| `realism_eval` | Plain/ellipsis/multi-clause test rows (leakage still filtered upstream) | no |
+| `adversarial_eval` | Sibling-confuser / root-vs-nested rows | yes (regression watch) |
+| `ambiguity_eval` | Rows with ≥2 valid coordinates (`coverage@k`, `set_recall@k`) | yes |
+| `real_schema_eval` | Test rows tied to ingested real SDLs | yes |
+| `curated_realism_eval` | Hand-written queries against your real schema | **release gate** |
+| `curated_challenge_eval` | Templated curated adversarial queries | no (sanity only) |
 
 ## Architecture Boundary
 

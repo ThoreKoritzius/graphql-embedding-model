@@ -18,14 +18,19 @@ def _unwrap_type_name(type_obj: Any) -> str:
 
 
 def _field_record(field_name: str, field: GraphQLField) -> FieldRecord:
+    # Input-object fields (``GraphQLInputField``) do not carry ``.args`` —
+    # only output-object fields do. Guard so the same helper can be used
+    # for both kinds without crashing on real-world schemas that expose
+    # input types.
+    raw_args = getattr(field, "args", None) or {}
     args = [
-        FieldArgRecord(name=a_name, type_name=_unwrap_type_name(a.type), description=a.description)
-        for a_name, a in field.args.items()
+        FieldArgRecord(name=a_name, type_name=_unwrap_type_name(a.type), description=getattr(a, "description", None))
+        for a_name, a in raw_args.items()
     ]
     return FieldRecord(
         name=field_name,
         type_name=_unwrap_type_name(field.type),
-        description=field.description,
+        description=getattr(field, "description", None),
         args=args,
     )
 

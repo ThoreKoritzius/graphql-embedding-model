@@ -25,7 +25,7 @@ def build_index(
 
     ids = [c.coordinate for c in corpus_rows]
     texts = [get_view_text(c, view) for c in corpus_rows]
-    emb = encode_with_resolution(model_path_or_name, texts, allow_remote_fallback=True)
+    emb = encode_with_resolution(model_path_or_name, texts, allow_remote_fallback=True, prompt_name="document")
 
     config = {
         "top_k_default": 10,

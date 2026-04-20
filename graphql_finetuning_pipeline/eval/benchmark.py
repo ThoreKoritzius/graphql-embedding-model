@@ -16,11 +16,20 @@ from graphql_finetuning_pipeline.utils.embeddings import encode_with_resolution
 from graphql_finetuning_pipeline.utils.io import ensure_dir, read_jsonl
 
 
-def _encode(model_or_ref: Any, texts: list[str]) -> np.ndarray:
+def _encode(model_or_ref: Any, texts: list[str], *, prompt_name: str | None = None) -> np.ndarray:
     if isinstance(model_or_ref, str):
-        return encode_with_resolution(model_or_ref, texts, allow_remote_fallback=True)
+        return encode_with_resolution(model_or_ref, texts, allow_remote_fallback=True, prompt_name=prompt_name)
     if hasattr(model_or_ref, "encode"):
-        emb = model_or_ref.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+        encode_kwargs: dict = {"normalize_embeddings": True, "show_progress_bar": False}
+        if prompt_name is not None:
+            available = getattr(model_or_ref, "prompts", None) or {}
+            if prompt_name in available:
+                encode_kwargs["prompt_name"] = prompt_name
+        try:
+            emb = model_or_ref.encode(texts, **encode_kwargs)
+        except TypeError:
+            encode_kwargs.pop("prompt_name", None)
+            emb = model_or_ref.encode(texts, **encode_kwargs)
         return np.asarray(emb, dtype=np.float32)
     raise TypeError("model_or_ref must be a model reference string or an object with .encode")
 
@@ -79,9 +88,9 @@ def evaluate_benchmark_set(rows: list[QueryRecord], corpus_rows: list[CorpusReco
     corpus_texts = [get_view_text(c, view) for c in corpus_rows]
 
     t0 = time.perf_counter()
-    corpus_emb = _encode(model_ref, corpus_texts)
+    corpus_emb = _encode(model_ref, corpus_texts, prompt_name="document")
     t1 = time.perf_counter()
-    query_emb = _encode(model_ref, [q.query for q in rows])
+    query_emb = _encode(model_ref, [q.query for q in rows], prompt_name="query")
     t2 = time.perf_counter()
 
     sims = cosine_similarity(query_emb, corpus_emb)
