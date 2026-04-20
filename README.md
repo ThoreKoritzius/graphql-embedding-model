@@ -2,6 +2,22 @@
 
 Field-coordinate-first pipeline for training an embedding model to map natural-language capability requests to GraphQL schema coordinates such as `Post.author` or `Query.userByEmail`.
 
+## Results
+
+Fine-tuned `Qwen/Qwen3-Embedding-0.6B` (v7 dataset, 3 epochs) vs base, on 223 held-out queries:
+
+| metric        | base  | tuned  |
+|---------------|-------|--------|
+| exact_match@1 | 0.090 | **0.229** |
+| recall@5      | 0.161 | **0.345** |
+| recall@10     | 0.215 | **0.435** |
+
+2.5× top-1 accuracy, 2× recall@5/10. The lift concentrates on queries where the user names a concept rather than a field — e.g. *"what commitments have we made about response times?"* → `SlaPolicy.description`. Base model ranks it **101st**; fine-tune ranks it **1st**.
+
+![ranking ladder preview](docs/images/ranking_ladder_sla.png)
+
+Full writeup: **[docs/training-results.md](docs/training-results.md)**.
+
 ## Goal
 
 This project trains the retrieval component for semantic introspection `__search`.

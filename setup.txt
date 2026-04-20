@@ -1,0 +1,74 @@
+root@ubuntu:~# cat .env
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev,wandb]'
+
+
+
+source .venv/bin/activate
+
+graphft generate-openai-seed \
+  --out-dir artifacts \
+  --version 1 \
+  --config examples/pipeline_config.yaml \
+  --real-schemas-dir schemas/real \
+  --phrasings-per-target 4
+
+graphft build-dataset \
+  --corpus artifacts/corpus/types_worlds_v1.jsonl \
+  --openai-seed artifacts/openai/seed_pairs_v1.jsonl \
+  --out-dir artifacts \
+  --version 1 \
+  --config examples/pipeline_config.yaml
+
+# Optional: merge a hand-written realism benchmark (release gate).
+graphft merge-curated-benchmark \
+  --curated examples/curated_realism_eval.template.jsonl \
+  --corpus artifacts/datasets/v1/corpus.jsonl \
+  --dataset-dir artifacts/datasets/v1
+
+graphft train-embedder \
+  --train artifacts/datasets/v1/train.jsonl \
+  --val artifacts/datasets/v1/val.jsonl \
+  --corpus artifacts/datasets/v1/corpus.jsonl \
+  --model Qwen/Qwen3-Embedding-0.6B \
+  --epochs 3 \
+  --batch-size 32 \
+  --learning-rate 2e-5 \
+  --disable-lora \
+  --positive-views coordinate,signature,semantic,sdl \
+  --primary-retrieval-view semantic \
+  --loss cached_mnrl \
+  --num-hard-negatives 4 \
+  --mnrl-scale 20 \
+  --mnrl-mini-batch-size 16 \
+  --precision auto \
+  --eval-every-epoch \
+  --benchmark-dir artifacts/datasets/v1/benchmarks \
+  --tracking-backend wandb \
+  --run-name qwen3-field-v1 \
+  --out-dir artifacts/models/qwen3-field-embedding-ft
+
+graphft eval-retrieval \
+  --eval-set artifacts/datasets/v1/test.jsonl \
+  --corpus artifacts/datasets/v1/corpus.jsonl \
+  --base-model Qwen/Qwen3-Embedding-0.6B \
+  --tuned-model artifacts/models/qwen3-field-embedding-ft \
+  --retrieval-view semantic \
+  --out-dir artifacts/eval/v1
+
+graphft run-benchmark \
+  --benchmark-dir artifacts/datasets/v1/benchmarks \
+  --corpus artifacts/datasets/v1/corpus.jsonl \
+  --model artifacts/models/qwen3-field-embedding-ft \
+  --retrieval-view semantic \
+  --out-dir artifacts/eval/benchmarks_v1
+
+graphft build-ann-index \
+  --corpus artifacts/datasets/v1/corpus.jsonl \
+  --model artifacts/models/qwen3-field-embedding-ft \
+  --retrieval-view semantic \
+  --out-dir artifacts/index/v1
+
+
+export WANDB_API_KEY=
