@@ -23,8 +23,7 @@ score = (q @ c.T).item()
 ```sh
 # Ollama (GGUF)
 hf download xthor/Qwen3-Embedding-0.6B-GraphQL model-q8_0.gguf --local-dir .
-echo "FROM ./model-q8_0.gguf
-PARAMETER embedding_only true" > Modelfile
+echo "FROM ./model-q8_0.gguf" > Modelfile
 ollama create qwen3-graphql-embedder -f Modelfile
 ```
 
