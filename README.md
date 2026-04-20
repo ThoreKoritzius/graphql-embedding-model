@@ -2,9 +2,35 @@
 
 Field-coordinate-first pipeline for training an embedding model to map natural-language capability requests to GraphQL schema coordinates such as `Post.author` or `Query.userByEmail`.
 
+**Released on Hugging Face:**
+- Model — [xthor/Qwen3-Embedding-0.6B-GraphQL](https://huggingface.co/xthor/Qwen3-Embedding-0.6B-GraphQL) (safetensors + GGUF for `llama.cpp` / Ollama)
+- Dataset — [xthor/Qwen3-Embedding-GraphQL-v1](https://huggingface.co/datasets/xthor/Qwen3-Embedding-GraphQL-v1)
+
+### Quick usage
+
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("xthor/Qwen3-Embedding-0.6B-GraphQL")
+q = model.encode("What's the nightly rate for this room?", prompt_name="query")
+c = model.encode(
+    ["GraphQL field Room.priceCents. Owner type: Room. Returns: Int."],
+    prompt_name="document",
+)
+score = (q @ c.T).item()
+```
+
+```sh
+# Ollama (GGUF)
+hf download xthor/Qwen3-Embedding-0.6B-GraphQL model-q8_0.gguf --local-dir .
+echo "FROM ./model-q8_0.gguf
+PARAMETER embedding_only true" > Modelfile
+ollama create qwen3-graphql-embedder -f Modelfile
+```
+
 ## Results
 
-Fine-tuned `Qwen/Qwen3-Embedding-0.6B` (v7 dataset, 3 epochs) vs base, on 223 held-out queries:
+Fine-tuned `Qwen/Qwen3-Embedding-0.6B` (3 epochs on 4,788 training queries) vs base, evaluated on 223 held-out test queries:
 
 | metric        | base  | tuned  |
 |---------------|-------|--------|
