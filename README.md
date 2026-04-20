@@ -12,9 +12,12 @@ Fine-tuned `Qwen/Qwen3-Embedding-0.6B` (v7 dataset, 3 epochs) vs base, on 223 he
 | recall@5      | 0.161 | **0.345** |
 | recall@10     | 0.215 | **0.435** |
 
-2.5× top-1 accuracy, 2× recall@5/10. The lift concentrates on queries where the user names a concept rather than a field — e.g. *"what commitments have we made about response times?"* → `SlaPolicy.description`. Base model ranks it **101st**; fine-tune ranks it **1st**.
+2.5× top-1 accuracy, 2× recall@5/10.
 
-![ranking ladder preview](docs/images/ranking_ladder_sla.png)
+![baseline vs tuned](docs/images/metrics_bars.png)
+![recall at k](docs/images/recall_at_k.png)
+
+The lift concentrates on queries where the user names a concept rather than a field — e.g. *"what commitments have we made about response times?"* → `SlaPolicy.description`. Base model ranks it **101st**; fine-tune ranks it **1st**.
 
 Full writeup: **[docs/training-results.md](docs/training-results.md)**.
 

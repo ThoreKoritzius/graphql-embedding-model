@@ -20,13 +20,15 @@ def _find_transformer_subdir(model_dir: Path) -> Path:
         raise FileNotFoundError(f"Missing modules.json in {model_dir}")
     modules = json.loads(modules_path.read_text(encoding="utf-8"))
     for mod in modules:
-        if mod.get("type") == "sentence_transformers.models.Transformer":
-            sub = model_dir / mod.get("path", "")
+        mod_type = mod.get("type", "")
+        if mod_type.endswith(".Transformer"):
+            sub = (model_dir / mod.get("path", "")).resolve()
             if (sub / "config.json").exists():
                 return sub
-    fallback = model_dir / "1_Transformer"
-    if (fallback / "config.json").exists():
-        return fallback
+    for fallback_name in ("1_Transformer", ""):
+        fallback = model_dir / fallback_name
+        if (fallback / "config.json").exists():
+            return fallback
     raise FileNotFoundError(f"Could not locate HF transformer sub-directory under {model_dir}")
 
 
